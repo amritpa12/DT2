@@ -470,9 +470,6 @@ func applyHyperliquidProtectionSync(pos *Position, result *HyperliquidProtection
 	if pos == nil || result == nil {
 		return
 	}
-	if result.StopLossFilledExternally {
-		pos.StopLossOID = 0
-	}
 	if result.StopLossOID > 0 {
 		pos.StopLossOID = result.StopLossOID
 	} else if result.CancelStopLossSucceeded && !result.StopLossOutcomeUnknown {
@@ -884,6 +881,9 @@ func runHyperliquidProtectionSyncForRemainder(
 		} else if recordPerpsStopLossClose(stratState, symbol, protection.StopLossTriggerPx, "protection_sync_sl_immediate", logger) {
 			return true, protection.StopLossTriggerPx, stopOutcome(protection), tpOutcome(protection)
 		}
+	}
+	if pos.StopLossOID > 0 && protection.StopLossFilledExternally && protection.StopLossOID <= 0 {
+		markHLProtectionSyncStopFilled(sc.ID, symbol, pos.StopLossOID)
 	}
 	clearHyperliquidProtectionOIDsMatching(pos, hlSurplusTPCancelsRemoved(removedTPOIDs, protection))
 	applyHyperliquidProtectionSync(pos, protection, plan.CancelTPOIDs)

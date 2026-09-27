@@ -19,15 +19,15 @@ func TestApplyHyperliquidProtectionSyncRetainsOnZeroFields(t *testing.T) {
 	}
 }
 
-func TestApplyHyperliquidProtectionSyncClearsFilledExternally(t *testing.T) {
-	pos := &Position{Symbol: "ETH", StopLossOID: 11, TPOIDs: []int64{22, 33}}
+func TestApplyHyperliquidProtectionSyncKeepsStopFilledExternally(t *testing.T) {
+	pos := &Position{Symbol: "ETH", StopLossOID: 11, StopLossTriggerPx: 1800, TPOIDs: []int64{22, 33}}
 	applyHyperliquidProtectionSync(pos, &HyperliquidProtectionSyncResult{
 		StopLossFilledExternally: true,
 		TPFilledExternally:       []bool{true, false},
 		TPOIDs:                   []int64{0, 33},
 	}, nil)
-	if pos.StopLossOID != 0 {
-		t.Errorf("StopLossOID = %d, want 0 (cleared because filled externally)", pos.StopLossOID)
+	if pos.StopLossOID != 11 || pos.StopLossTriggerPx != 1800 {
+		t.Errorf("SL = oid %d @ %g, want 11 @ 1800 kept so the reconciler can attribute the stop fill", pos.StopLossOID, pos.StopLossTriggerPx)
 	}
 	if !reflect.DeepEqual(pos.TPOIDs, []int64{0, 33}) {
 		t.Errorf("TPOIDs = %v, want [0 33] (TP1 cleared because filled externally)", pos.TPOIDs)
