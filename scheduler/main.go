@@ -1953,6 +1953,7 @@ func main() {
 
 				trades := 0
 				var detail string
+				var hlStep *hlStepTradeAlerts
 				switch sc.Type {
 				case "spot":
 					if sc.Platform == "okx" {
@@ -2234,14 +2235,15 @@ func main() {
 						}
 					} else if result, signalStr, price, ok := runHyperliquidCheck(&sc, prices, hlPosCtx, cfg.Regime, resolveATRMethod(sc, cfg), notifier, logger, hlBatchResults, feedCtx); ok {
 						prices[result.Symbol] = price
+						hlStep = beginHyperliquidStepTradeAlerts(sc, stratState, &mu)
 						guardSameSideClose(sc, result, hlPosSide, hlPosQty, notifier, logger)
 						if cbManageOnly {
 							result.Signal = 0
 						}
-						paperStopTrades, paperStopDetail := 0, ""
 						if !hyperliquidIsLive(sc.Args) && hlPosQty > 0 {
-							paperStopTrades, paperStopDetail = applyPaperStopLossBreach(sc, stratState, result.Symbol, hlPosSide, price, &mu, logger)
-							if paperStopTrades > 0 {
+							breachAt := hlStep.historyLen(&mu)
+							if paperStopTrades, paperStopDetail := applyPaperStopLossBreach(sc, stratState, result.Symbol, hlPosSide, price, &mu, logger); paperStopTrades > 0 {
+								hlStep.bindWindow(&mu, breachAt, paperStopDetail)
 								hlPosQty, hlPosSide, hlAvgCost, hlEntryATR = 0, "", 0, 0
 								hlStopLossTriggerPx, hlStopLossHighWaterPx, hlPosSnapshot = 0, 0, nil
 								hlScaleInCount, hlLastAddPrice, hlAddedNotionalUSD = 0, 0, 0
@@ -2333,9 +2335,9 @@ func main() {
 									if newTrigger > 0 {
 										pos.StopLossTriggerPx = newTrigger
 									}
+									stopAt := hlStep.historyLenLocked()
 									if recordPerpsStopLossClose(stratState, result.Symbol, breachPx, paperStopReasonTrailing, logger) {
-										paperStopTrades++
-										paperStopDetail = fmt.Sprintf("[%s] PAPER TRAILING SL %s @ $%.2f", sc.ID, result.Symbol, breachPx)
+										hlStep.bindWindowLocked(stopAt, fmt.Sprintf("[%s] PAPER TRAILING SL %s @ $%.2f", sc.ID, result.Symbol, breachPx))
 									}
 								} else {
 									if newHighWater > 0 {
@@ -2363,9 +2365,9 @@ func main() {
 								forceResize := hlScaleInResizePending && !capped
 								newHighWater, slUpdate, updateConfirmed := runHyperliquidTrailingStopUpdate(sc, result.Symbol, hlPosSide, slEffectiveQty, hlPosSnapshot, price, hlStopLossHighWaterPx, hlStopLossTriggerPx, hlStopLossOID, trailingReplacePolicy{forceResize: forceResize, ratchetTightened: manageRatchetTightened, liquidationPx: hlLiquidationPxForSide(hlLiquidationPx, hlNetSideByCoin, result.Symbol, hlPosSide)}, notifier, logger)
 								mu.Lock()
+								stopAt := hlStep.historyLenLocked()
 								if immediateFill, fillPx := applyTrailingStopUpdateResult(stratState, result.Symbol, hlPosSide, hlStopLossOID, newHighWater, updateConfirmed, slUpdate, "trailing_stop_loss_immediate", logger, slEffectiveQty); immediateFill {
-									trades++
-									detail = fmt.Sprintf("[%s] LIVE TRAILING SL %s @ $%.2f", sc.ID, result.Symbol, fillPx)
+									hlStep.bindWindowLocked(stopAt, fmt.Sprintf("[%s] LIVE TRAILING SL %s @ $%.2f", sc.ID, result.Symbol, fillPx))
 								}
 								if forceResize && updateConfirmed {
 									if p, ok := stratState.Positions[result.Symbol]; ok && p != nil {
@@ -2385,9 +2387,9 @@ func main() {
 									logger.Info("Paper SL armed @ $%.4f (%s, anchor $%.4f)", newTrigger, stopReason, pos.riskAnchorPrice())
 								}
 								if breach {
+									stopAt := hlStep.historyLenLocked()
 									if recordPerpsStopLossClose(stratState, result.Symbol, breachPx, stopReason, logger) {
-										paperStopTrades++
-										paperStopDetail = fmt.Sprintf("[%s] %s %s @ $%.2f", sc.ID, paperStopLossDetailLabel(stopReason), result.Symbol, breachPx)
+										hlStep.bindWindowLocked(stopAt, fmt.Sprintf("[%s] %s %s @ $%.2f", sc.ID, paperStopLossDetailLabel(stopReason), result.Symbol, breachPx))
 									}
 								}
 							}
@@ -2425,9 +2427,9 @@ func main() {
 										mu.Lock()
 										if pos, ok3 := stratState.Positions[result.Symbol]; ok3 && pos.Quantity > 0 && pos.Side == hlPosSide && pos.StopLossOID == 0 {
 											if slResult.StopLossFilledImmediately && slResult.StopLossTriggerPx > 0 {
+												stopAt := hlStep.historyLenLocked()
 												if recordPerpsStopLossCloseQty(stratState, result.Symbol, hlPlacedStopQty(slEffectiveQty, slResult.StopLossSize), slResult.StopLossTriggerPx, "stop_loss_atr_immediate", logger) {
-													trades++
-													detail = fmt.Sprintf("[%s] LIVE FIXED ATR SL %s @ $%.2f", sc.ID, result.Symbol, slResult.StopLossTriggerPx)
+													hlStep.bindWindowLocked(stopAt, fmt.Sprintf("[%s] LIVE FIXED ATR SL %s @ $%.2f", sc.ID, result.Symbol, slResult.StopLossTriggerPx))
 												}
 											} else if slResult.StopLossOID > 0 {
 												pos.StopLossOID = slResult.StopLossOID
@@ -2454,19 +2456,19 @@ func main() {
 							mu.Unlock()
 						}
 						if hyperliquidIsLive(sc.Args) && result.Signal == 0 && hlPosQty > 0 {
+							syncAt := hlStep.historyLen(&mu)
 							if _, fillPx := runHyperliquidProtectionSync(sc, stratState, stratDB, result.Symbol, &mu, notifier, logger, "HL protection synced", hlReconcileFillHintsJSON, hlLiquidationPx, hlNetSideByCoin, hlProtectionGuardFull, hlCycle); fillPx > 0 {
-								trades++
-								detail = fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, result.Symbol, fillPx)
+								hlStep.bindWindow(&mu, syncAt, fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, result.Symbol, fillPx))
 							}
+							postTPAt := hlStep.historyLen(&mu)
 							if _, slFills, slDetail := runPostTPStopLossAdjustment(sc, stratState, result.Symbol, price, cfg, &mu, notifier, logger, hlCycle, hlLiquidationPx, hlNetSideByCoin); slFills > 0 {
-								trades += slFills
-								detail = mergeTradeDetails(detail, slDetail)
+								hlStep.bindWindow(&mu, postTPAt, slDetail)
 							}
 						}
 						if !hyperliquidIsLive(sc.Args) && result.Signal == 0 && hlPosQty > 0 {
+							flipAt := hlStep.historyLen(&mu)
 							if flipTrades, flipDetail := advancePaperDynamicCloseRegime(sc, stratState, stratDB, result.Symbol, price, &mu, logger); flipTrades > 0 {
-								paperStopTrades += flipTrades
-								paperStopDetail = flipDetail
+								hlStep.bindWindow(&mu, flipAt, flipDetail)
 							}
 							runPaperPostTPStopLossAdjustment(sc, stratState, result.Symbol, price, cfg, &mu, notifier, logger)
 						}
@@ -2542,9 +2544,9 @@ func main() {
 									unfilled := hlExecuteFillOutcome(er, nil, hlPosQty)
 									if hlPosQty > 0 && result.LiveOrderSubmitted && hlUnfilledCloseNeedsRearm(result.LiveOrderCancelRequested, unfilled, canceledOIDs) {
 										execRearm.Backing.PreSend = result.SizedClosePreSend
+										rearmAt := hlStep.historyLen(&mu)
 										if extraTrades, slDetail := rearmAfterSizedClose(sc, stratState, stratDB, result.Symbol, hlPosSide, hlPosQty, unfilled, execRearm, &mu, notifier, logger); extraTrades > 0 {
-											trades += extraTrades
-											detail = slDetail
+											hlStep.bindWindow(&mu, rearmAt, slDetail)
 										}
 									}
 								}
@@ -2554,14 +2556,13 @@ func main() {
 							mu.Lock()
 							var openTrade *Trade
 							var ratchetAlert *RatchetTriggerAlert
+							var execTrades int
+							var execDetail string
+							execAt := hlStep.historyLenLocked()
 							if scaleInAddQty > 0 {
-								trades, detail, openTrade, ratchetAlert = executeHyperliquidScaleInDeferredOpen(sc, stratState, result, execResult, signalStr, price, scaleInAddQty, logger)
+								execTrades, execDetail, openTrade, ratchetAlert = executeHyperliquidScaleInDeferredOpen(sc, stratState, result, execResult, signalStr, price, scaleInAddQty, logger)
 							} else {
-								trades, detail, openTrade, ratchetAlert = executeHyperliquidResultDeferredOpen(sc, stratState, result, execResult, signalStr, price, cfg.Regime, cfg, hurstDecision, logger)
-							}
-							if paperStopTrades > 0 {
-								trades += paperStopTrades
-								detail = mergeTradeDetails(paperStopDetail, detail)
+								execTrades, execDetail, openTrade, ratchetAlert = executeHyperliquidResultDeferredOpen(sc, stratState, result, execResult, signalStr, price, cfg.Regime, cfg, hurstDecision, logger)
 							}
 							if openTrade != nil {
 								var pos *Position
@@ -2570,26 +2571,27 @@ func main() {
 								}
 								recordPositionOpen(stratState, sc, openTrade, pos)
 							}
+							hlStep.bindExecuteLocked(execAt, execDetail)
 							mu.Unlock()
 							notifyRatchetTrigger(notifier, sc.NotifyRatchetTriggersEnabled(cfg), ratchetAlert)
-							ratchetWalkerOwnedByScaleIn := scaleInAddQty > 0 && execResult != nil && trades > 0
+							ratchetWalkerOwnedByScaleIn := scaleInAddQty > 0 && execResult != nil && execTrades > 0
 							if ratchetAlert != nil && !ratchetWalkerOwnedByScaleIn {
+								walkerAt := hlStep.historyLen(&mu)
 								if extraTrades, slDetail := runTrailingStopUpdateAfterRatchetTighten(sc, stratState, result.Symbol, price, hlCycle, hlLiquidationPx, hlNetSideByCoin, &mu, notifier, logger); extraTrades > 0 {
-									trades += extraTrades
-									detail = slDetail
+									hlStep.bindWindow(&mu, walkerAt, slDetail)
 								}
 							}
 							sizedCloseShortFill := result.SizedCloseBookedQty > 0
-							if execResult != nil && trades > 0 {
+							if execResult != nil && execTrades > 0 {
+								syncAt := hlStep.historyLen(&mu)
 								if sizedCloseShortFill {
 									logger.Info("Sized close %s filled short; the remainder's protection is re-armed at the backed size instead of the post-trade sync", result.Symbol)
 								} else if _, fillPx := runHyperliquidProtectionSync(sc, stratState, stratDB, result.Symbol, &mu, notifier, logger, "HL protection synced after trade", hlReconcileFillHintsJSON, hlLiquidationPx, hlNetSideByCoin, hlProtectionGuardFull, hlCycle); fillPx > 0 {
-									trades++
-									detail = fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, result.Symbol, fillPx)
+									hlStep.bindWindow(&mu, syncAt, fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, result.Symbol, fillPx))
 								}
+								postTPAt := hlStep.historyLen(&mu)
 								if _, slFills, slDetail := runPostTPStopLossAdjustment(sc, stratState, result.Symbol, price, cfg, &mu, notifier, logger, hlCycle, hlLiquidationPx, hlNetSideByCoin); slFills > 0 {
-									trades += slFills
-									detail = mergeTradeDetails(detail, slDetail)
+									hlStep.bindWindow(&mu, postTPAt, slDetail)
 								}
 								if scaleInAddQty > 0 {
 									filledAddQty := scaleInAddQty
@@ -2597,15 +2599,15 @@ func main() {
 										filledAddQty = execResult.Execution.Fill.TotalSz
 									}
 									hedgeFreshExposureQty = filledAddQty
+									resizeAt := hlStep.historyLen(&mu)
 									if extraTrades, slDetail := scaleInResizeTrailingSLNow(sc, stratState, result.Symbol, price, hlCycle, hlLiquidationPx, hlNetSideByCoin, ratchetAlert != nil, &mu, notifier, logger); extraTrades > 0 {
-										trades += extraTrades
-										detail = slDetail
+										hlStep.bindWindow(&mu, resizeAt, slDetail)
 									}
 								} else {
 									if !sizedCloseShortFill {
+										armAt := hlStep.historyLen(&mu)
 										if extraTrades, slDetail := armTrailingStopAtOpenNow(sc, stratState, result.Symbol, price, hlCycle, &mu, notifier, logger); extraTrades > 0 {
-											trades += extraTrades
-											detail = slDetail
+											hlStep.bindWindow(&mu, armAt, slDetail)
 										}
 									}
 								}
@@ -2622,12 +2624,12 @@ func main() {
 							}
 							if sizedCloseShortFill {
 								execRearm.Backing.PreSend = result.SizedClosePreSend
+								rearmAt := hlStep.historyLen(&mu)
 								if extraTrades, slDetail := rearmAfterSizedClose(sc, stratState, stratDB, result.Symbol, hlPosSide, hlPosQty, hlCloseFillOutcome{Filled: result.SizedCloseBookedQty, Known: true}, execRearm, &mu, notifier, logger); extraTrades > 0 {
-									trades += extraTrades
-									detail = slDetail
+									hlStep.bindWindow(&mu, rearmAt, slDetail)
 								}
 							}
-							if execResult == nil && !hyperliquidIsLive(sc.Args) && result.Signal != 0 && trades > 0 {
+							if execResult == nil && !hyperliquidIsLive(sc.Args) && result.Signal != 0 && execTrades > 0 {
 								runPaperPostTPStopLossAdjustment(sc, stratState, result.Symbol, price, cfg, &mu, notifier, logger)
 							}
 						}
@@ -2654,7 +2656,9 @@ func main() {
 								logger.Error("Replay mirror: failed to read decision log: %v — holding last replayed state (#1431)", perr)
 							case len(pending) > 0:
 								mu.Lock()
+								replayAt := hlStep.historyLenLocked()
 								appliedIDs, replayTrades, replayDetails, driftDMs := applyReplayedLiveDecisions(sc, stratState, pending, price, result, cfg, logger)
+								hlStep.bindWindowLocked(replayAt, replayDetails...)
 								var saveErr error
 								if len(appliedIDs) > 0 {
 									saveErr = store.SaveStrategyBook(stratState)
@@ -2662,8 +2666,6 @@ func main() {
 								mu.Unlock()
 								sendReplayDriftWarns(driftDMs)
 								if replayTrades > 0 {
-									trades += replayTrades
-									detail = mergeTradeDetails(detail, replayDetails...)
 									runPaperPostTPStopLossAdjustment(sc, stratState, result.Symbol, price, cfg, &mu, notifier, logger)
 								}
 								if len(appliedIDs) > 0 {
@@ -2688,6 +2690,7 @@ func main() {
 								Live:              hyperliquidIsLive(sc.Args),
 							}, notifier, logger)
 						}
+						trades, detail = hlStep.finish(&mu, notifier, cfg.Regime, logger)
 					}
 				case "futures":
 					if result, signalStr, price, ok := runTopStepCheck(sc, prices, tsPosCtx, cfg.Regime, resolveATRMethod(sc, cfg), notifier, logger); ok {
@@ -2748,7 +2751,7 @@ func main() {
 					if pos != nil && hyperliquidIsLive(sc.Args) {
 						if _, fillPx := runHyperliquidProtectionSync(sc, stratState, stratDB, sc.Symbol, &mu, notifier, logger, "HL manual protection synced", hlReconcileFillHintsJSON, hlLiquidationPx, hlNetSideByCoin, hlProtectionGuardFull, hlCycle); fillPx > 0 {
 							trades++
-							detail = fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, sc.Symbol, fillPx)
+							detail = mergeTradeDetails(detail, fmt.Sprintf("[%s] LIVE PROTECTION SYNC SL %s @ $%.2f", sc.ID, sc.Symbol, fillPx))
 						}
 					}
 					if feedHeld, feedWhy := feedCtx.feedHoldsSignal(sc); feedHeld {
@@ -2790,39 +2793,9 @@ func main() {
 							notifyRatchetTrigger(notifier, sc.NotifyRatchetTriggersEnabled(cfg), ratchetAlert)
 							manualRatchetTightened = ratchetAlert != nil
 						}
-						mu.RLock()
-						pos = stratState.Positions[sc.Symbol]
-						mu.RUnlock()
-						if pos != nil && mark > 0 && strategyUsesTrailingTPRatchetClose(sc) && effectiveTrailingStopPct(sc, pos) > 0 {
-							mu.RLock()
-							manualPeers, manualOpp := hlPeerBookListOnCoin(state.Strategies, hlReconcileAll, sc.Symbol, sc.ID, pos.Side)
-							manualBook := pos.Quantity
-							manualSide := pos.Side
-							manualArmed := hlBookArmed(pos)
-							mu.RUnlock()
-							q := hlStopQty{Qty: manualBook, Fresh: true}
-							if hlCycle != nil {
-								q = hlCycle.StopQty(sc, sc.Symbol, manualSide, manualBook, manualArmed, manualPeers, manualOpp)
-							}
-							slEffectiveQty, capped, place := hlReplaceQty(q, manualBook)
-							if place {
-								if capped {
-									logger.Warn("manual trailing SL: virtual qty %.6f > chain share %.6f for %s; capping", manualBook, slEffectiveQty, sc.Symbol)
-								}
-								prevSLOID := pos.StopLossOID
-								forceResize := pos.ScaleInResizePending && !capped
-								newHighWater, slUpdate, updateConfirmed := runHyperliquidTrailingStopUpdate(sc, sc.Symbol, pos.Side, slEffectiveQty, pos, mark, pos.StopLossHighWaterPx, pos.StopLossTriggerPx, pos.StopLossOID, trailingReplacePolicy{forceResize: forceResize, ratchetTightened: manualRatchetTightened, liquidationPx: hlLiquidationPxForSide(hlLiquidationPx, hlNetSideByCoin, sc.Symbol, pos.Side)}, notifier, logger)
-								mu.Lock()
-								if immediateFill, fillPx := applyTrailingStopUpdateResult(stratState, sc.Symbol, pos.Side, prevSLOID, newHighWater, updateConfirmed, slUpdate, "trailing_stop_loss_immediate", logger, slEffectiveQty); immediateFill {
-									logger.Info("[%s] manual trailing SL filled immediately %s @ $%.2f", sc.ID, sc.Symbol, fillPx)
-								}
-								if forceResize && updateConfirmed {
-									if p, ok := stratState.Positions[sc.Symbol]; ok && p != nil {
-										p.ScaleInResizePending = false
-									}
-								}
-								mu.Unlock()
-							}
+						if manualFills, manualDetail := runManualTrailingStopUpdate(sc, stratState, state.Strategies, hlReconcileAll, hlCycle, hlLiquidationPx, hlNetSideByCoin, mark, manualRatchetTightened, &mu, notifier, logger); manualFills > 0 {
+							trades += manualFills
+							detail = mergeTradeDetails(detail, manualDetail)
 						}
 					}
 					if manualOK && closeFraction > 0 {
@@ -2907,7 +2880,7 @@ func main() {
 							}
 							if closeTrades > 0 {
 								trades += closeTrades
-								detail = closeDetail
+								detail = mergeTradeDetails(detail, closeDetail)
 							}
 						}
 					}
@@ -2920,7 +2893,9 @@ func main() {
 						key := chKey + "|" + extractAsset(sc)
 						channelTradeDetails[key] = append(channelTradeDetails[key], detail)
 					}
-					sendTradeAlerts(sc, stratState, trades, &mu, notifier, cfg.Regime)
+					if hlStep == nil {
+						sendTradeAlerts(sc, stratState, trades, &mu, notifier, cfg.Regime)
+					}
 				}
 
 				totalTrades += trades

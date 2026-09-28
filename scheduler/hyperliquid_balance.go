@@ -33,10 +33,14 @@ type hyperliquidTradeAlertState struct {
 	newTrades []Trade
 }
 
+func hyperliquidPublicTradeAlertRow(trade Trade) bool {
+	return trade.TradeType != hedgeTradeType
+}
+
 func hyperliquidPublicTradeAlertRows(trades []Trade) []Trade {
 	rows := make([]Trade, 0, len(trades))
 	for _, trade := range trades {
-		if trade.TradeType == hedgeTradeType {
+		if !hyperliquidPublicTradeAlertRow(trade) {
 			continue
 		}
 		rows = append(rows, trade)
