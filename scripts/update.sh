@@ -105,10 +105,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --rsync-from <dir>  rsync code from a source clone into this deployment (skips git pull;"
             echo "                      hardcoded exclusions protect .env, config, state DB, venv, binaries)."
             echo "  --all               update+restart every deployment. Batch = union of ACTIVE go-trader"
-            echo "                      systemd units' WorkingDirectory (layout-independent) and the"
-            echo "                      <root>/go-trader-*/ glob. Auto-discovery is active-only, so it never"
-            echo "                      starts a stopped/failed deployment; the glob still restarts anything"
-            echo "                      under <root>. --update-all-root pins the glob root (skips systemd)."
+            echo "                      systemd units' WorkingDirectory (layout-independent), ENABLED units whose"
+            echo "                      --config sets role=feed, and the <root>/go-trader-*/ glob. A stopped or"
+            echo "                      failed enabled feed is updated and started. Scheduler discovery is"
+            echo "                      active-only, so it never starts a stopped/failed scheduler; the glob"
+            echo "                      still restarts anything under <root>."
+            echo "                      Deployments whose config sets role=feed run first, then schedulers."
+            echo "                      A glob dir with no discovered unit maps to an active go-trader@<name>, or an"
+            echo "                      enabled role=feed one, whose WorkingDirectory is the dir."
+            echo "                      --update-all-root pins the glob root."
             echo "  With --all + systemd: each child resolves GO_TRADER_SERVICE from the active unit that owns"
             echo "                      that deployment's WorkingDirectory (per-dir systemd lookup). Parent"
             echo "                      --unit / --service / GO_TRADER_SERVICE is overridden when a per-dir"
@@ -600,7 +605,7 @@ if [[ "$update_all" == "1" ]]; then
     declare -a all_dirs=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && all_dirs+=("$line")
-    done < <(printf '%s\n' "${canon[@]}" | sort -u)
+    done < <(printf '%s\n' "${canon[@]}" | sort -u | order_deployments_feeds_first)
     discovery_source=$(IFS='+'; printf '%s' "${discovery_sources[*]}")
     echo "[update] --all: ${#all_dirs[@]} deployment dir(s) via ${discovery_source} discovery"
     declare -A unit_for_dir=()
@@ -638,6 +643,10 @@ if [[ "$update_all" == "1" ]]; then
         fi
         update_count=$((update_count + 1))
         mapped_unit="${unit_for_dir[$d]:-}"
+        if [[ -z "$mapped_unit" ]]; then
+            mapped_unit=$(update_convention_unit_for_dir "$d")
+        fi
+        echo "[update] --all: $(cd "$d" && pwd) role=$(update_deployment_role "$d")"
         # resolve_child_unit_override is the tested helper that decides the
         # child's effective unit + argv. Production runs must share that
         # single decision so tests cover the real branch.
