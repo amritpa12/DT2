@@ -36,7 +36,7 @@ Walks asset/strategy/platform/capital/risk/Discord choices and writes `scheduler
 
 ```bash
 git clone https://github.com/richkuo/go-trader.git && cd go-trader
-curl -LsSf https://astral.sh/uv/install.sh | sh    # install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh    # uv for every account (SKILL.md Prerequisites)
 uv sync                                             # Python deps from lockfile
 
 VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -404,6 +404,8 @@ bash scripts/update.sh --restart --restart-mode signal             # bare-proces
 bash scripts/update.sh --rsync-from /path/to/staged-build --restart
 bash scripts/update.sh --all --restart                             # batch all instances
 ```
+
+When your own account owns the deployment tree, run `bash scripts/update.sh --restart` without `sudo`; the script calls `sudo` itself only for the systemd steps. As root, the update refuses a tree whose owning account runs any unit without the `go-trader@.service` sandbox (SKILL.md § Auto-Update, "Root on a tree another account owns").
 
 Optional: `sudo bash scripts/shared-feed-convert.sh plan --consumer <unit>` starts a checked, reversible conversion to the shared market feed. Updates never run it. See SKILL.md § Shared market feed.
 

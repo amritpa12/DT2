@@ -1423,4 +1423,292 @@ JSON
 )" "drift audit is read-only"
 rm -rf "$drift"
 
+assert_eq "$(update_git_trust_decision 0 1001 0)" "trust" "root trusts a tree whose top another account owns"
+assert_eq "$(update_git_trust_decision 0 0 1001)" "trust" "root trusts a tree whose .git another account owns"
+assert_eq "$(update_git_trust_decision 0 0 0)" "" "root does not add trust for its own tree"
+assert_eq "$(update_git_trust_decision 1001 0 1002)" "" "a non-root caller never adds trust"
+trust_env=$(GIT_CONFIG_COUNT='' update_git_trust_env /opt/go-trader-paper 0 1001 1001)
+assert_eq "$trust_env" "$(printf '%s\n' GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/opt/go-trader-paper GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2=/dev/null GIT_CONFIG_COUNT=3)" \
+    "trust names only the exact tree, never *"
+assert_eq "$(GIT_CONFIG_COUNT=2 update_git_trust_env /t 0 5 5 | tail -n 1)" "GIT_CONFIG_COUNT=5" "trust appends after existing GIT_CONFIG entries"
+assert_eq "$(update_git_trust_env /t 0 0 0)" "" "no trust env for a root-owned tree"
+
+if command -v git >/dev/null 2>&1; then
+    gt=$(mktemp -d)
+    gt=$(cd "$gt" && pwd -P)
+    gtenv=(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com)
+    env "${gtenv[@]}" git init -q "$gt/origin.git" --bare
+    env "${gtenv[@]}" git init -q "$gt/tree"
+    mkdir -p "$gt/tree/scheduler"
+    echo one >"$gt/tree/scheduler/f.txt"
+    env "${gtenv[@]}" git -C "$gt/tree" add -A
+    env "${gtenv[@]}" git -C "$gt/tree" commit -qm one
+    env "${gtenv[@]}" git -C "$gt/tree" remote add origin "$gt/origin.git"
+    assert_eq "$(update_git_top "$gt/tree/scheduler")" "$gt/tree" "update_git_top walks up to the checkout"
+    if update_git_top "$gt" >/dev/null; then
+        echo "FAIL: update_git_top found a checkout above a plain directory" >&2
+        exit 1
+    fi
+
+    dubious=$(env "${gtenv[@]}" GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git -C "$gt/tree" rev-parse HEAD 2>&1) && dubious_rc=0 || dubious_rc=$?
+    if [[ "$dubious_rc" == 0 || "$dubious" != *"dubious ownership"* ]]; then
+        echo "note: this git does not simulate another owner; the trust and refusal cases are skipped ($dubious)"
+    else
+        trusted=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && trusted+=("$line")
+        done <<<"$(update_git_trust_env "$gt/tree" 0 1001 1001)"
+        trusted_head=$(env "${gtenv[@]}" "${trusted[@]}" GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git -C "$gt/tree/scheduler" rev-parse HEAD 2>&1) \
+            || { echo "FAIL: git refused the tree with the per-command trust: $trusted_head" >&2; exit 1; }
+        assert_eq "$trusted_head" "$(env "${gtenv[@]}" git -C "$gt/tree" rev-parse HEAD)" "per-command trust reads the tree another account owns"
+        other_env=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && other_env+=("$line")
+        done <<<"$(update_git_trust_env "$gt/other" 0 1001 1001)"
+        if env "${gtenv[@]}" "${other_env[@]}" GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git -C "$gt/tree" rev-parse HEAD >/dev/null 2>&1; then
+            echo "FAIL: trust for another path let git read this tree" >&2
+            exit 1
+        fi
+
+        origin_err=$(env "${gtenv[@]}" GIT_TEST_ASSUME_DIFFERENT_OWNER=1 bash -c 'source "$1"; update_git "$2" remote get-url origin' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree" 2>&1) && origin_rc=0 || origin_rc=$?
+        if [[ "$origin_rc" == 0 ]]; then
+            echo "FAIL: update_git hid a git refusal" >&2
+            exit 1
+        fi
+        owner_name=$(update_path_owner_name "$gt/tree")
+        for want in "git refused $gt/tree" "owned by $owner_name" "dubious ownership"; do
+            if [[ "$origin_err" != *"$want"* ]]; then
+                echo "FAIL: the refusal note lacks '$want': $origin_err" >&2
+                exit 1
+            fi
+        done
+        if [[ "$origin_err" == *"no git origin"* ]]; then
+            echo "FAIL: a refusal was reported as a missing origin: $origin_err" >&2
+            exit 1
+        fi
+    fi
+
+    assert_eq "$(env "${gtenv[@]}" bash -c 'source "$1"; update_git "$2" remote get-url origin' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree/scheduler")" \
+        "$gt/origin.git" "update_git passes stdout through"
+    env "${gtenv[@]}" git -C "$gt/tree" remote remove origin
+    missing_err=$(env "${gtenv[@]}" bash -c 'source "$1"; update_git "$2" remote get-url origin' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree" 2>&1) && missing_rc=0 || missing_rc=$?
+    if [[ "$missing_rc" == 0 || "$missing_err" != *"git remote failed in $gt/tree"* || "$missing_err" != *"tree owner"* || "$missing_err" != *"origin"* ]]; then
+        echo "FAIL: a missing remote must name the tree, the owner and the git error: $missing_err" >&2
+        exit 1
+    fi
+    diff_rc=0
+    echo two >"$gt/tree/scheduler/f.txt"
+    diff_err=$(env "${gtenv[@]}" bash -c 'source "$1"; update_git "$2" diff --quiet' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree" 2>&1) || diff_rc=$?
+    assert_eq "$diff_rc" "1" "git diff --quiet keeps its exit status through update_git"
+    assert_eq "$diff_err" "" "a quiet diff prints no failure note"
+
+    base=$(env "${gtenv[@]}" git -C "$gt/tree" describe --tags --always)
+    assert_eq "$(env "${gtenv[@]}" bash -c 'source "$1"; update_git_version "$2"' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree")" "${base}-mod" "a tracked change stamps -mod"
+    env "${gtenv[@]}" git -C "$gt/tree" checkout -q -- scheduler/f.txt
+    echo new >"$gt/tree/untracked.txt"
+    assert_eq "$(env "${gtenv[@]}" bash -c 'source "$1"; update_git_version "$2"' _ "$SCRIPT_DIR/update_helpers.sh" "$gt/tree")" "$base" "an untracked file does not stamp -mod"
+    assert_eq "$base" "$(env "${gtenv[@]}" git -C "$gt/tree" describe --tags --always --dirty=-mod)" "update_git_version matches describe --dirty=-mod"
+    rm -rf "$gt"
+else
+    echo "note: git not installed; update_git cases skipped"
+fi
+
+tools_dir=$(mktemp -d)
+mkdir -p "$tools_dir/bin"
+printf '#!/bin/sh\necho stub\n' >"$tools_dir/bin/uv"
+chmod 0755 "$tools_dir/bin/uv"
+assert_eq "$(PATH="$tools_dir/bin:/usr/bin:/bin" update_resolve_tool uv)" "$tools_dir/bin/uv" "uv resolves from PATH first"
+home_dir=$(mktemp -d)
+mkdir -p "$home_dir/.local/bin"
+printf '#!/bin/sh\necho home\n' >"$home_dir/.local/bin/uv"
+chmod 0755 "$home_dir/.local/bin/uv"
+home_uv=$(HOME="$home_dir" PATH="/usr/bin:/bin" update_resolve_tool uv || true)
+if [[ "$home_uv" == "$home_dir"/* ]]; then
+    echo "FAIL: update_resolve_tool took uv from a home directory: $home_uv" >&2
+    exit 1
+fi
+rm -rf "$home_dir"
+for fixed in /usr/local/bin/uv /usr/bin/uv /opt/homebrew/bin/uv; do
+    if [[ -x "$fixed" ]]; then
+        echo "note: $fixed exists; the uv-missing case is skipped"
+        fixed=""
+        break
+    fi
+done
+if [[ -n "${fixed:-}" ]]; then
+    if PATH="/usr/bin:/bin" update_resolve_tool uv >/dev/null; then
+        echo "FAIL: uv resolved with no uv on PATH or at a fixed path" >&2
+        exit 1
+    fi
+    tools_out=$(PATH="/usr/bin:/bin" update_build_tools_preflight "$(update_current_account)") && tools_rc=0 || tools_rc=$?
+    assert_eq "$tools_rc" "1" "the tools preflight fails without uv"
+    if [[ "$tools_out" != *"finds no uv"* || "$tools_out" != *"UV_INSTALL_DIR=/usr/local/bin"* ]]; then
+        echo "FAIL: the tools preflight did not name the missing uv and the fix: $tools_out" >&2
+        exit 1
+    fi
+fi
+tools_out=$(PATH="$tools_dir/bin:$PATH" update_build_tools_preflight "$(update_current_account)" 2>&1) && tools_rc=0 || tools_rc=$?
+if [[ "$tools_out" != *"uv: $(update_current_account) runs $tools_dir/bin/uv"* ]]; then
+    echo "FAIL: the tools preflight did not report the uv it runs: $tools_out" >&2
+    exit 1
+fi
+rm -rf "$tools_dir"
+
+if [[ "$EUID" != "0" ]]; then
+    own=$(mktemp -d)
+    assert_eq "$(update_tree_foreign_owner "$own")" "" "a non-root caller never restores ownership"
+    rm -rf "$own"
+fi
+
+give_dir=$(mktemp -d)
+mkdir -p "$give_dir/tree/sub"
+echo outside >"$give_dir/outside.txt"
+ln "$give_dir/outside.txt" "$give_dir/tree/sub/linked.txt"
+echo own >"$give_dir/tree/sub/own.txt"
+give_out=$(update_give_tree "$give_dir/tree" "$(id -u):$(id -g)" 2>&1)
+if [[ "$give_out" != *"1 file(s) under $give_dir/tree share their data"* || "$give_out" != *"linked.txt"* ]]; then
+    echo "FAIL: update_give_tree did not skip and report the hard-linked file: $give_out" >&2
+    exit 1
+fi
+rm -rf "$give_dir"
+
+wide=$(mktemp -d)
+mkdir -p "$wide/tree"
+for i in $(seq 1 300); do
+    mkdir "$wide/tree/d$i"
+    : >"$wide/tree/d$i/f"
+done
+wide_out=$( (ulimit -n 64 && update_give_tree "$wide/tree" "$(id -u):$(id -g)") 2>&1) && wide_rc=0 || wide_rc=$?
+[[ "$wide_rc" == "0" ]] || { echo "FAIL: the give-back failed on a wide directory: $wide_out" >&2; exit 1; }
+wide_gave=$( (ulimit -n 64 && python3 -I -c "$UPDATE_OWNER_PY" give "$wide/tree" "$(id -u):$(id -g)") | sed -n 's/^GAVE //p')
+assert_eq "$wide_gave" "601" "the give-back reaches every entry of a wide directory, with no subtree skipped"
+rm -rf "$wide"
+
+if [[ "$EUID" == "0" ]]; then
+    rs=$(mktemp -d)
+    mkdir -p "$rs/tree/scheduler" "$rs/outside"
+    echo secret >"$rs/tree/scheduler/secret"
+    chmod 0600 "$rs/tree/scheduler/secret"
+    echo outside >"$rs/outside/file"
+    chown -R 65534:65534 "$rs/tree"
+    chown root:root "$rs/tree/scheduler/secret"
+    update_owner_snapshot "$rs/tree" "$rs/snap"
+    mv "$rs/tree/scheduler/secret" "$rs/tree/scheduler/renamed"
+    echo new >"$rs/tree/scheduler/new.txt"
+    ln -s "$rs/outside" "$rs/tree/scheduler/link"
+    rs_out=$(update_restore_tree_owner "$rs/tree" 65534:65534 "$rs/snap" 2>&1)
+    assert_eq "$(stat -c '%u' "$rs/tree/scheduler/new.txt")" "65534" "a file the update wrote is given back"
+    assert_eq "$(stat -c '%u' "$rs/tree/scheduler/renamed")" "0" "a root-owned file from before the update stays root-owned after a rename"
+    assert_eq "$(stat -c '%u' "$rs/outside/file")" "0" "the give-back does not follow a symlink out of the tree"
+    assert_eq "$(stat -c '%u' "$rs/tree/scheduler/link")" "65534" "the symlink itself is given back"
+    if [[ "$rs_out" != *"renamed"* ]]; then
+        echo "FAIL: the kept root-owned file was not named: $rs_out" >&2
+        exit 1
+    fi
+    rm -rf "$rs"
+fi
+
+if [[ "$EUID" == "0" ]]; then
+    ft=$(mktemp -d)
+    mkdir -p "$ft/tree/.git" "$ft/bin"
+    ft_tree=$(update_realpath "$ft/tree")
+    chown 65534:65534 "$ft_tree/.git"
+    cat >"$ft/bin/systemctl" <<'STUB'
+#!/bin/bash
+case "$1" in
+    list-units) printf 'loose.service loaded inactive dead x\n' ;;
+    list-unit-files) printf 'loose.service disabled enabled\n' ;;
+    show) printf 'Id=loose.service\nUser=65534\nProtectSystem=no\nReadWritePaths=\nBindPaths=\n' ;;
+esac
+STUB
+    chmod 0755 "$ft/bin/systemctl"
+    assert_eq "$(update_tree_foreign_accounts "$ft_tree")" "65534" "a foreign-owned .git under a root-owned top is a foreign account"
+    mkdir -p "$ft/plain"
+    ft_rc=0
+    (set -euo pipefail; ft_plain=$(update_tree_foreign_accounts "$ft/plain"); [[ -z "$ft_plain" ]]) || ft_rc=$?
+    assert_eq "$ft_rc" "0" "a root-owned tree with no .git has no foreign account and succeeds under pipefail"
+    ft_out=$(PATH="$ft/bin:$PATH" update_foreign_tree_check "$ft_tree") && ft_rc=0 || ft_rc=$?
+    assert_eq "$ft_rc:$ft_out" "1:  loose.service (User=65534): ProtectSystem=no, not strict" "an unconfined unit of the .git owner refuses a root-owned tree"
+    chown 65533:65533 "$ft_tree"
+    ft_out=$(PATH="$ft/bin:$PATH" update_foreign_tree_check "$ft_tree") && ft_rc=0 || ft_rc=$?
+    assert_eq "$ft_rc" "1" "a top and a .git owned by two other accounts are refused"
+    if [[ "$ft_out" != *"uid 65533 and its .git to uid 65534"* ]]; then
+        echo "FAIL: the two-owner refusal did not name both owners: $ft_out" >&2
+        exit 1
+    fi
+    rm -rf "$ft"
+fi
+
+assert_eq "$(update_write_path_issue /opt/t /opt/t/scheduler)" "" "the scheduler directory is an allowed write path"
+assert_eq "$(update_write_path_issue /opt/t /opt/t/logs/x)" "" "a path under logs is an allowed write path"
+assert_eq "$(update_write_path_issue /opt/t /var/lib/go-trader/t)" "" "a path outside the tree is allowed"
+assert_eq "$(update_write_path_issue /opt/t /opt/t-other)" "" "a sibling with the tree name as prefix is outside the tree"
+assert_eq "$(update_write_path_issue /opt/t /opt/t/.git)" "can write /opt/t/.git inside the tree" "the git directory is refused"
+assert_eq "$(update_write_path_issue /opt/t /opt)" "can write /opt, which holds the whole tree" "a parent of the tree is refused"
+assert_eq "$(update_write_path_issue /opt/t /opt/t)" "can write /opt/t, which holds the whole tree" "the tree root is refused"
+conf_dir=$(mktemp -d)
+conf_tree=$(update_realpath "$conf_dir")
+assert_eq "$(update_unit_confinement_issues "$conf_tree" strict "$conf_tree/scheduler -$conf_tree/logs" "")" "" "the template write paths pass"
+assert_eq "$(update_unit_confinement_issues "$conf_tree" no "" "")" "ProtectSystem=no, not strict" "a unit without ProtectSystem=strict is refused"
+assert_eq "$(update_unit_confinement_issues "$conf_tree" strict "$conf_tree/scheduler $conf_tree/.venv" "")" "ReadWritePaths can write $conf_tree/.venv inside the tree" "a write path over the venv is refused"
+assert_eq "$(update_unit_confinement_issues "$conf_tree" strict "" "$conf_tree/shared_scripts:/srv/x:rbind")" "BindPaths can write $conf_tree/shared_scripts inside the tree" "a bind mount from inside the tree is refused"
+mkdir -p "$conf_dir/bin"
+cat >"$conf_dir/bin/systemctl" <<STUB
+#!/bin/bash
+block() {
+    case "\$1" in
+        loose.service) printf 'Id=loose.service\nUser=$(id -un)\nProtectSystem=no\nReadWritePaths=\nBindPaths=\n' ;;
+        safe.service) printf 'Id=safe.service\nUser=$(id -un)\nProtectSystem=strict\nReadWritePaths=$conf_tree/scheduler $conf_tree/logs\nBindPaths=\n' ;;
+        unloaded.service) printf 'Id=unloaded.service\nUser=$(id -un)\nProtectSystem=strict\nReadWritePaths=$conf_tree\nBindPaths=\n' ;;
+        tmpl@$UPDATE_CONFINEMENT_INSTANCE.service) printf 'Id=tmpl@$UPDATE_CONFINEMENT_INSTANCE.service\nUser=$(id -u)\nProtectSystem=full\nReadWritePaths=\nBindPaths=\n' ;;
+        *) printf 'Id=%s\nUser=\nProtectSystem=no\nReadWritePaths=\nBindPaths=\n' "\$1" ;;
+    esac
+}
+case "\$1" in
+    list-units) printf 'loose.service loaded inactive dead x\nsafe.service loaded active running x\nrootunit.service loaded active running x\n' ;;
+    list-unit-files) printf 'loose.service disabled enabled\nunloaded.service disabled enabled\ntmpl@.service static -\nrootunit.service enabled enabled\n' ;;
+    show)
+        shift
+        first=1
+        for u in "\$@"; do
+            case "\$u" in -p|--) continue ;; Id|User|ProtectSystem|ReadWritePaths|BindPaths) continue ;; esac
+            [[ \$first == 1 ]] || printf '\n'
+            first=0
+            block "\$u"
+        done ;;
+esac
+STUB
+chmod 0755 "$conf_dir/bin/systemctl"
+conf_out=$(PATH="$conf_dir/bin:$PATH" update_foreign_tree_confinement "$conf_tree" "$(id -u)") && conf_rc=0 || conf_rc=$?
+assert_eq "$conf_rc" "1" "an unconfined unit of the tree owner fails the confinement check"
+assert_eq "$conf_out" "  loose.service (User=$(id -un)): ProtectSystem=no, not strict
+  tmpl@.service (User=$(id -u)): ProtectSystem=full, not strict
+  unloaded.service (User=$(id -un)): ReadWritePaths can write $conf_tree, which holds the whole tree" "unconfined units of the owner are listed, including unit files systemd has not loaded and templates"
+conf_out=$(PATH="$conf_dir/bin:$PATH" update_foreign_tree_confinement "$conf_tree" 99999) && conf_rc=0 || conf_rc=$?
+assert_eq "$conf_rc:$conf_out" "0:" "units of other accounts do not count"
+rm -rf "$conf_dir"
+
+export_go=$(update_resolve_tool go || true)
+if [[ -n "$export_go" ]] && command -v git >/dev/null 2>&1; then
+    ex=$(mktemp -d)
+    mkdir -p "$ex/tree/scheduler"
+    printf 'module fixture\n\ngo 1.21\n' >"$ex/tree/scheduler/go.mod"
+    printf 'package main\n\nimport "fmt"\n\nvar Version = "none"\n\nfunc main() { fmt.Println(Version) }\n' >"$ex/tree/scheduler/main.go"
+    git -C "$ex/tree" init -q
+    git -C "$ex/tree" add -A
+    git -C "$ex/tree" -c user.email=t@example.invalid -c user.name=t commit -qm init
+    printf 'package main\n\nimport "os"\n\nfunc init() { _ = os.WriteFile("%s/planted", nil, 0o644) }\n' "$ex" >"$ex/tree/scheduler/zz.go"
+    printf '*\n' >"$ex/tree/scheduler/.gitignore"
+    printf 'go 1.21\n\nuse ./missing\n' >"$ex/tree/scheduler/go.work"
+    update_build_go_export "$ex/tree" HEAD "$export_go" v9.9.9 "$ex/out" >/dev/null
+    assert_eq "$("$ex/out")" "v9.9.9" "the exported build carries the version stamp"
+    if [[ -e "$ex/planted" ]]; then
+        echo "FAIL: the exported build compiled an untracked scheduler file" >&2
+        exit 1
+    fi
+    rm -rf "$ex"
+else
+    echo "note: go or git not installed; the export build case is skipped"
+fi
+
 echo "OK: update_helpers tests passed"

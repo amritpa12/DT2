@@ -709,3 +709,610 @@ resolve_child_unit_override() {
         printf '%s\n' "$@"
     fi
 }
+
+UPDATE_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+update_tool_fixed_paths() {
+    case "$1" in
+        go) printf '%s\n' /opt/homebrew/bin/go /usr/local/go/bin/go ;;
+        uv) printf '%s\n' /usr/local/bin/uv /usr/bin/uv /opt/homebrew/bin/uv ;;
+    esac
+}
+
+update_resolve_tool() {
+    local name="$1" p
+    p=$(command -v "$name" 2>/dev/null || true)
+    if [[ "$p" == /* && -f "$p" && -x "$p" ]]; then
+        printf '%s' "$p"
+        return 0
+    fi
+    while IFS= read -r p; do
+        if [[ -n "$p" && -f "$p" && -x "$p" ]]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done <<<"$(update_tool_fixed_paths "$name")"
+    return 1
+}
+
+update_tool_fixed_text() {
+    local name="$1" p list=""
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && list="${list:+$list, }$p"
+    done <<<"$(update_tool_fixed_paths "$name")"
+    printf '%s' "$list"
+}
+
+update_tool_version_arg() {
+    case "$1" in
+        go) printf 'version' ;;
+        *) printf -- '--version' ;;
+    esac
+}
+
+update_current_account() {
+    id -un 2>/dev/null || printf 'uid-%s' "$EUID"
+}
+
+update_tool_runs_as() {
+    local account="$1" tool="$2" arg p out rc=0
+    arg=$(update_tool_version_arg "$tool")
+    if [[ "$account" == "$(update_current_account)" ]]; then
+        p=$(update_resolve_tool "$tool") || return 1
+        printf '%s' "$p"
+        "$p" "$arg" >/dev/null 2>&1 || return 2
+        return 0
+    fi
+    command -v runuser >/dev/null 2>&1 || return 3
+    out=$(runuser -u "$account" -- /usr/bin/env -i PATH="$UPDATE_SYSTEM_PATH" "$BASH" -c \
+        "cd / 2>/dev/null; $(declare -f update_tool_fixed_paths update_resolve_tool)"'
+p=$(update_resolve_tool "$1") || exit 11
+printf "%s" "$p"
+"$p" "$2" >/dev/null 2>&1 || exit 12
+exit 0' _ "$tool" "$arg" 2>/dev/null) || rc=$?
+    printf '%s' "$out"
+    case "$rc" in
+        0) return 0 ;;
+        11) return 1 ;;
+        12) return 2 ;;
+        *) return 4 ;;
+    esac
+}
+
+update_resolve_tool_system() {
+    /usr/bin/env -i PATH="$UPDATE_SYSTEM_PATH" "$BASH" -c \
+        "$(declare -f update_tool_fixed_paths update_resolve_tool)"'
+update_resolve_tool "$1"' _ "$1"
+}
+
+update_build_tools_preflight() {
+    local tool account p rc bad_uv=0 bad_go=0 me searched
+    me=$(update_current_account)
+    for tool in uv go; do
+        for account in "$@"; do
+            [[ -n "$account" ]] || continue
+            if [[ "$account" == "$me" ]]; then
+                searched="PATH=$PATH"
+            else
+                searched="PATH=$UPDATE_SYSTEM_PATH"
+            fi
+            rc=0
+            p=$(update_tool_runs_as "$account" "$tool") || rc=$?
+            case "$rc" in
+                0) echo "[tools] $tool: $account runs $p" ;;
+                1) echo "[tools] $tool: $account finds no $tool (searched $searched, then $(update_tool_fixed_text "$tool"))" ;;
+                2) echo "[tools] $tool: $account finds $p but cannot run it" ;;
+                3) echo "[tools] $tool: cannot check $account (runuser is not installed)" ;;
+                *) echo "[tools] $tool: the check as $account did not run (does the account exist?)" ;;
+            esac
+            if [[ "$rc" != 0 ]]; then
+                [[ "$tool" == uv ]] && bad_uv=1
+                [[ "$tool" == go ]] && bad_go=1
+            fi
+        done
+    done
+    [[ "$bad_uv" == 0 ]] || echo "[tools] $(update_build_tools_fix uv)"
+    [[ "$bad_go" == 0 ]] || echo "[tools] $(update_build_tools_fix go)"
+    [[ "$bad_uv" == 0 && "$bad_go" == 0 ]]
+}
+
+update_build_tools_fix() {
+    case "$1" in
+        uv) printf '%s' "fix: install uv where every account finds it: curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh (a copy in one account's home directory, such as /root/.local/bin, does not count)" ;;
+        go) printf '%s' "fix: install Go under /usr/local/go as SKILL.md Prerequisites shows, so every account finds /usr/local/go/bin/go" ;;
+    esac
+}
+
+update_path_uid() {
+    stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
+}
+
+update_path_gid() {
+    stat -c '%g' "$1" 2>/dev/null || stat -f '%g' "$1" 2>/dev/null
+}
+
+update_path_owner_name() {
+    local name
+    name=$(stat -c '%U' "$1" 2>/dev/null || stat -f '%Su' "$1" 2>/dev/null || true)
+    printf '%s' "${name:-unknown}"
+}
+
+update_path_group_name() {
+    local name
+    name=$(stat -c '%G' "$1" 2>/dev/null || stat -f '%Sg' "$1" 2>/dev/null || true)
+    printf '%s' "${name:-unknown}"
+}
+
+update_git_top() {
+    local d
+    d=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    while true; do
+        if [[ -e "${d%/}/.git" ]]; then
+            printf '%s' "$d"
+            return 0
+        fi
+        [[ "$d" != "/" ]] || return 1
+        d="${d%/*}"
+        [[ -n "$d" ]] || d="/"
+    done
+}
+
+update_git_trust_decision() {
+    local caller="$1" owner
+    shift
+    [[ "$caller" == "0" ]] || return 0
+    for owner in "$@"; do
+        if [[ -n "$owner" && "$owner" != "0" ]]; then
+            printf 'trust'
+            return 0
+        fi
+    done
+}
+
+update_git_trust_env() {
+    local top="$1" caller="$2"
+    shift 2
+    [[ -n "$top" && "$(update_git_trust_decision "$caller" "$@")" == "trust" ]] || return 0
+    local n="${GIT_CONFIG_COUNT:-0}"
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    printf '%s\n' \
+        "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=$top" \
+        "GIT_CONFIG_KEY_$((n + 1))=core.fsmonitor" "GIT_CONFIG_VALUE_$((n + 1))=false" \
+        "GIT_CONFIG_KEY_$((n + 2))=core.hooksPath" "GIT_CONFIG_VALUE_$((n + 2))=/dev/null" \
+        "GIT_CONFIG_COUNT=$((n + 3))"
+}
+
+update_git_env_for() {
+    local top
+    [[ "$EUID" == "0" ]] || return 0
+    top=$(update_git_top "$1") || return 0
+    update_git_trust_env "$top" "$EUID" "$(update_path_uid "$top")" "$(update_path_uid "$top/.git")"
+}
+
+update_git_failure_note() {
+    local tree="$1" rc="$2" err="$3" sub="$4" top owner me first
+    top=$(update_git_top "$tree" || true)
+    owner=$(update_path_owner_name "${top:-$tree}")
+    me=$(update_current_account)
+    first="${err%%$'\n'*}"
+    if [[ "$err" == *"dubious ownership"* ]]; then
+        if [[ "$EUID" == "0" ]]; then
+            printf '[git] git refused %s: owned by %s, running as %s, and this git ignored the per-command safe.directory for that tree (%s). Upgrade git, or run the command as %s.\n' \
+                "${top:-$tree}" "$owner" "$me" "$first" "$owner"
+        else
+            printf '[git] git refused %s: owned by %s, running as %s (%s). Run the script as root, which trusts only this tree for each git command, or as %s.\n' \
+                "${top:-$tree}" "$owner" "$me" "$first" "$owner"
+        fi
+        return 0
+    fi
+    printf '[git] git %s failed in %s (exit %s; tree owner %s, running as %s): %s\n' \
+        "$sub" "$tree" "$rc" "$owner" "$me" "$first"
+}
+
+update_git() {
+    local tree="$1"
+    shift
+    local line errtxt outfd rc=0 sub=""
+    local -a trust=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && trust+=("$line")
+    done <<<"$(update_git_env_for "$tree")"
+    for line in "$@"; do
+        [[ "$line" == -* ]] && continue
+        sub="$line"
+        break
+    done
+    exec {outfd}>&1
+    if [[ ${#trust[@]} -gt 0 ]]; then
+        errtxt=$(/usr/bin/env "${trust[@]}" git -C "$tree" "$@" 2>&1 1>&"$outfd") || rc=$?
+    else
+        errtxt=$(git -C "$tree" "$@" 2>&1 1>&"$outfd") || rc=$?
+    fi
+    exec {outfd}>&-
+    [[ -z "$errtxt" ]] || printf '%s\n' "$errtxt" >&2
+    if [[ "$rc" != 0 && -n "$errtxt" ]]; then
+        update_git_failure_note "$tree" "$rc" "$errtxt" "$sub" >&2
+    fi
+    return "$rc"
+}
+
+update_git_version() {
+    local tree="$1" base dirty
+    base=$(update_git "$tree" describe --tags --always) || return 1
+    [[ -n "$base" ]] || return 1
+    dirty=$(update_git "$tree" --no-optional-locks status --porcelain --untracked-files=no) || return 1
+    if [[ -n "$dirty" ]]; then
+        base="${base}-mod"
+    fi
+    printf '%s' "$base"
+}
+
+update_build_go_export() {
+    local tree="$1" commit="$2" go_bin="$3" ver="$4" out="$5" work rc=0
+    work=$(mktemp -d "${TMPDIR:-/tmp}/go-trader-build.XXXXXX") || return 1
+    if ! update_git "$tree" archive --format=tar -o "$work/src.tar" "$commit" scheduler || ! tar -x -f "$work/src.tar" -C "$work"; then
+        rm -rf "$work"
+        return 1
+    fi
+    GOWORK=off GOFLAGS=-mod=readonly "$go_bin" -C "$work/scheduler" build -buildvcs=false -ldflags "-X main.Version=$ver" -o "$out" . || rc=$?
+    rm -rf "$work"
+    return "$rc"
+}
+
+update_realpath() {
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+update_path_within() {
+    local p="${1%/}" d="${2%/}"
+    [[ -n "$p" ]] || p="/"
+    [[ -n "$d" ]] || d="/"
+    [[ "$p" == "$d" || "$d" == "/" || "$p" == "$d/"* ]]
+}
+
+update_write_path_issue() {
+    local tree="${1%/}" path="$2"
+    if update_path_within "$tree" "$path"; then
+        printf 'can write %s, which holds the whole tree' "$path"
+        return 0
+    fi
+    if update_path_within "$path" "$tree" && ! update_path_within "$path" "$tree/scheduler" && ! update_path_within "$path" "$tree/logs"; then
+        printf 'can write %s inside the tree' "$path"
+    fi
+}
+
+update_unit_confinement_issues() {
+    local tree="$1" protect="$2" rw="$3" bind="$4" entry path issue
+    local -a entries=()
+    [[ "$protect" == "strict" ]] || printf 'ProtectSystem=%s, not strict\n' "${protect:-no}"
+    read -r -a entries <<<"$rw"
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        path="${entry#-}"
+        path="${path#+}"
+        [[ "$path" == /* ]] || continue
+        issue=$(update_write_path_issue "$tree" "$(update_realpath "$path")")
+        [[ -z "$issue" ]] || printf 'ReadWritePaths %s\n' "$issue"
+    done
+    entries=()
+    read -r -a entries <<<"$bind"
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        path="${entry#-}"
+        path="${path%%:*}"
+        [[ "$path" == /* ]] || continue
+        issue=$(update_write_path_issue "$tree" "$(update_realpath "$path")")
+        [[ -z "$issue" ]] || printf 'BindPaths %s\n' "$issue"
+    done
+}
+
+UPDATE_CONFINEMENT_INSTANCE="update-confinement-check"
+
+update_foreign_tree_units() {
+    local listed files
+    listed=$(systemctl list-units --type=service --all --no-legend --plain 2>/dev/null) || return 1
+    files=$(systemctl list-unit-files --type=service --no-legend --plain 2>/dev/null) || return 1
+    printf '%s\n%s\n' "$listed" "$files" | awk -v inst="$UPDATE_CONFINEMENT_INSTANCE" '
+        { n = $1; sub(/@\.service$/, "@" inst ".service", n); if (n ~ /\.service$/) print n }' | sort -u
+}
+
+update_foreign_tree_confinement() {
+    local tree="$1" uid="$2" units_text shown unit user protect rw bind unit_uid issues issue out=""
+    local -a units=()
+    if ! command -v systemctl >/dev/null 2>&1; then
+        printf 'systemd is not available here, so nothing shows which files the tree owner can change\n'
+        return 1
+    fi
+    tree=$(update_realpath "$tree")
+    if ! units_text=$(update_foreign_tree_units); then
+        printf 'systemctl could not list the service units and unit files, so nothing shows which files the tree owner can change\n'
+        return 1
+    fi
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] && units+=("$unit")
+    done <<<"$units_text"
+    [[ ${#units[@]} -gt 0 ]] || return 0
+    if ! shown=$(systemctl show -p Id -p User -p ProtectSystem -p ReadWritePaths -p BindPaths -- "${units[@]}" 2>/dev/null); then
+        printf 'systemctl could not read the settings of the service units, so nothing shows which files the tree owner can change\n'
+        return 1
+    fi
+    while IFS=$'\x1f' read -r unit user protect rw bind; do
+        [[ -n "$unit" && -n "$user" ]] || continue
+        if [[ "$user" =~ ^[0-9]+$ ]]; then
+            unit_uid="$user"
+        else
+            unit_uid=$(id -u "$user" 2>/dev/null) || continue
+        fi
+        [[ "$unit_uid" == "$uid" ]] || continue
+        [[ "$unit" == *"@$UPDATE_CONFINEMENT_INSTANCE.service" ]] && unit="${unit%"$UPDATE_CONFINEMENT_INSTANCE.service"}.service"
+        issues=$(update_unit_confinement_issues "$tree" "$protect" "$rw" "$bind")
+        while IFS= read -r issue; do
+            [[ -n "$issue" ]] && out+="  $unit (User=$user): $issue"$'\n'
+        done <<<"$issues"
+    done < <(awk '
+        function flush() { if (id != "") printf "%s\037%s\037%s\037%s\037%s\n", id, user, protect, rw, bind; id = user = protect = rw = bind = "" }
+        /^$/ { flush(); next }
+        { k = $0; sub(/=.*/, "", k); v = substr($0, length(k) + 2) }
+        k == "Id" { id = v } k == "User" { user = v } k == "ProtectSystem" { protect = v }
+        k == "ReadWritePaths" { rw = v } k == "BindPaths" { bind = v }
+        END { flush() }' <<<"$shown")
+    [[ -z "$out" ]] || { printf '%s' "$out"; return 1; }
+}
+
+update_tree_foreign_accounts() {
+    [[ "$EUID" == "0" ]] || return 0
+    local tree="${1%/}" uid
+    for uid in "$(update_path_uid "$tree")" "$(update_path_uid "$tree/.git")"; do
+        if [[ -n "$uid" && "$uid" != "0" ]]; then
+            printf '%s\n' "$uid"
+        fi
+    done | sort -u
+}
+
+update_foreign_tree_check() {
+    local tree="${1%/}" uids
+    local -a list=()
+    uids=$(update_tree_foreign_accounts "$tree")
+    [[ -n "$uids" ]] || return 0
+    while IFS= read -r uid; do
+        [[ -n "$uid" ]] && list+=("$uid")
+    done <<<"$uids"
+    if [[ ${#list[@]} -gt 1 ]]; then
+        printf '  the tree top belongs to uid %s and its .git to uid %s; root trusts a checkout only when one account besides root owns it\n' \
+            "$(update_path_uid "$tree")" "$(update_path_uid "$tree/.git")"
+        return 1
+    fi
+    update_foreign_tree_confinement "$tree" "${list[0]}"
+}
+
+update_tree_foreign_owner() {
+    [[ "$EUID" == "0" ]] || return 0
+    local uid gid
+    uid=$(update_path_uid "$1")
+    gid=$(update_path_gid "$1")
+    [[ -n "$uid" && -n "$gid" && "$uid" != "0" ]] || return 0
+    printf '%s:%s' "$uid" "$gid"
+}
+
+UPDATE_OWNER_PY='
+import errno, os, stat, sys
+mode, tree = sys.argv[1], os.path.realpath(sys.argv[2])
+O_PATH = getattr(os, "O_PATH", 0)
+if O_PATH:
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.fchownat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_int]
+AT_EMPTY_PATH = 0x1000
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+class Entry:
+    def __init__(self, path, name, dfd, fd, st, opath):
+        self.path, self.name, self.dfd, self.fd, self.st, self.opath = path, name, dfd, fd, st, opath
+    def chown(self, uid, gid):
+        if self.fd is None:
+            os.chown(self.name, uid, gid, dir_fd=self.dfd, follow_symlinks=False)
+        elif self.opath:
+            if libc.fchownat(self.fd, b"", uid, gid, AT_EMPTY_PATH) != 0:
+                e = ctypes.get_errno()
+                raise OSError(e, os.strerror(e), self.path)
+        else:
+            os.fchown(self.fd, uid, gid)
+    def stat(self):
+        if self.fd is None:
+            return os.stat(self.name, dir_fd=self.dfd, follow_symlinks=False)
+        return os.fstat(self.fd)
+def pin(name, dfd):
+    try:
+        if O_PATH:
+            return os.open(name, O_PATH | os.O_NOFOLLOW, dir_fd=dfd)
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        if stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode) or stat.S_ISFIFO(st.st_mode):
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0), dir_fd=dfd)
+        return None
+    except OSError as e:
+        if isinstance(e, FileNotFoundError) or e.errno == errno.ELOOP:
+            return False
+        raise
+SKIP_OPEN = (errno.ELOOP, errno.ENOTDIR, errno.ENOENT)
+def walk_dir(path, dfd, top):
+    for name in sorted(os.listdir(dfd)):
+        fd = pin(name, dfd)
+        if fd is False:
+            continue
+        try:
+            entry = Entry(os.path.join(path, name), name, dfd, fd, None, bool(O_PATH))
+            try:
+                entry.st = entry.stat()
+            except FileNotFoundError:
+                continue
+            if entry.st.st_dev != top.st_dev:
+                continue
+            yield entry, top
+            ident = (entry.st.st_dev, entry.st.st_ino) if stat.S_ISDIR(entry.st.st_mode) else None
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if ident is None:
+            continue
+        try:
+            child = os.open(name, DIR_FLAGS, dir_fd=dfd)
+        except OSError as e:
+            if e.errno in SKIP_OPEN:
+                continue
+            raise
+        try:
+            cst = os.fstat(child)
+            if (cst.st_dev, cst.st_ino) == ident:
+                yield from walk_dir(entry.path, child, top)
+        finally:
+            os.close(child)
+def walk():
+    top_fd = os.open(tree, DIR_FLAGS)
+    try:
+        top = os.fstat(top_fd)
+        yield Entry(tree, None, None, top_fd, top, False), top
+        yield from walk_dir(tree, top_fd, top)
+    finally:
+        os.close(top_fd)
+def report(kind, exc, tb):
+    if isinstance(exc, OSError):
+        sys.stderr.write("[ownership] %s: %s\n" % (exc.filename or tree, exc.strerror or exc))
+    else:
+        sys.__excepthook__(kind, exc, tb)
+sys.excepthook = report
+def shared_inode(st):
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
+def owner_ids(spec):
+    import pwd, grp
+    user, group = spec.split(":", 1)
+    uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
+    gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
+    return uid, gid
+if mode == "snapshot":
+    recs = []
+    for e, _ in walk():
+        if e.st.st_uid == 0:
+            recs.append(b"%d:%d:%d:%s" % (e.st.st_dev, e.st.st_ino, e.st.st_mtime_ns, os.fsencode(e.path)))
+    with open(sys.argv[3], "wb") as f:
+        f.write(b"\0".join(recs))
+    sys.exit(0)
+if mode == "give":
+    uid, gid = owner_ids(sys.argv[3])
+    gave, linked = 0, []
+    for e, _ in walk():
+        if shared_inode(e.st):
+            linked.append(e.path)
+            continue
+        e.chown(uid, gid)
+        gave += 1
+    print("GAVE %d" % gave)
+    print("LINKED %d %s" % (len(linked), " ".join(linked[:5])))
+    sys.exit(0)
+uid, gid = owner_ids(sys.argv[4])
+with open(sys.argv[3], "rb") as f:
+    raw = f.read()
+before_paths, before_ids = set(), set()
+for rec in raw.split(b"\0"):
+    if not rec:
+        continue
+    dev, ino, mtime, p = rec.split(b":", 3)
+    before_ids.add((int(dev), int(ino), int(mtime)))
+    before_paths.add(os.fsdecode(p))
+new, old, linked, left = [], [], [], []
+for e, _ in walk():
+    if e.st.st_uid != 0:
+        continue
+    if e.path in before_paths or (e.st.st_dev, e.st.st_ino, e.st.st_mtime_ns) in before_ids:
+        old.append(e.path)
+        continue
+    if shared_inode(e.st):
+        linked.append(e.path)
+        continue
+    e.chown(uid, gid)
+    if e.stat().st_uid == 0:
+        left.append(e.path)
+    else:
+        new.append(e.path)
+if left:
+    print("FAILED %d %s" % (len(left), left[0]))
+    sys.exit(1)
+print("GAVE %d" % len(new))
+print("KEPT %d %s" % (len(old), " ".join(old[:5])))
+print("LINKED %d %s" % (len(linked), " ".join(linked[:5])))
+'
+
+update_owner_snapshot() {
+    python3 -I -c "$UPDATE_OWNER_PY" snapshot "$1" "$2"
+}
+
+update_restore_tree_owner() {
+    local tree="$1" owner="$2" snap="$3" out rc=0 line gave=0 kept=0 examples="" linked=0 linked_examples=""
+    [[ -n "$tree" && -n "$owner" && -n "$snap" && -f "$snap" ]] || return 0
+    out=$(python3 -I -c "$UPDATE_OWNER_PY" restore "$tree" "$snap" "$owner") || rc=$?
+    while IFS= read -r line; do
+        case "$line" in
+            GAVE\ *) gave="${line#GAVE }" ;;
+            KEPT\ *) line="${line#KEPT }"; kept="${line%% *}"; examples="${line#"$kept"}" ;;
+            LINKED\ *) line="${line#LINKED }"; linked="${line%% *}"; linked_examples="${line#"$linked"}" ;;
+            FAILED\ *) echo "[update] ownership: could not give ${line#FAILED } back to $owner" >&2 ;;
+        esac
+    done <<<"$out"
+    [[ "$rc" == 0 ]] || return 1
+    if [[ "$gave" != 0 ]]; then
+        echo "[update] ownership: $gave path(s) this update wrote as root under $tree given back to $(update_path_owner_name "$tree")"
+    fi
+    if [[ "$linked" != 0 ]]; then
+        echo "[update] warning: $linked root-owned file(s) under $tree share their data with another path (a hard link) and stay root-owned, so their other names keep their owner (for example${linked_examples})" >&2
+    fi
+    if [[ "$kept" != 0 && "${UPDATE_OWNER_KEPT_WARNED:-}" != "$tree" ]]; then
+        UPDATE_OWNER_KEPT_WARNED="$tree"
+        echo "[update] warning: $kept path(s) under $tree were owned by root before this update and stay so (for example${examples}); list them with: find $tree -xdev -user root, then give only the ones the owner needs with: chown -h $(update_path_owner_name "$tree"):$(update_path_group_name "$tree") <path>" >&2
+    fi
+    return 0
+}
+
+update_give_tree() {
+    local dir="$1" owner="$2" out line gave=0 linked=0 linked_examples=""
+    out=$(python3 -I -c "$UPDATE_OWNER_PY" give "$dir" "$owner") || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            GAVE\ *) gave="${line#GAVE }" ;;
+            LINKED\ *) line="${line#LINKED }"; linked="${line%% *}"; linked_examples="${line#"$linked"}" ;;
+        esac
+    done <<<"$out"
+    if [[ "$linked" != 0 ]]; then
+        echo "[ownership] warning: $linked file(s) under $dir share their data with another path (a hard link) and keep their owner (for example${linked_examples})" >&2
+    fi
+    return 0
+}
+
+update_probe_as_owner() {
+    local tree="$1" owner="$2" binary="$3" config="$4" p
+    local -a rw=() args=()
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        echo "[update] systemd-run is not installed, so the probe cannot run as the owner of $tree under the unit sandbox" >&2
+        return 1
+    fi
+    for p in "$tree/scheduler" "$tree/logs"; do
+        [[ -d "$p" ]] && rw+=("$p")
+    done
+    args=(--wait --pipe --collect --quiet --unit "go-trader-update-probe-$$-$RANDOM"
+        "--uid=${owner%%:*}" "--gid=${owner#*:}"
+        -p "WorkingDirectory=$tree" -p ProtectSystem=strict -p PrivateTmp=true -p NoNewPrivileges=true
+        -E PYTHONDONTWRITEBYTECODE=1)
+    [[ ${#rw[@]} -gt 0 ]] && args+=(-p "ReadWritePaths=${rw[*]}")
+    systemd-run "${args[@]}" -- /bin/sh -c 'd=$(mktemp -d) && cp -- "$2" "$d/config.json" && exec "$1" probe --config "$d/config.json"' sh "$binary" "$config" </dev/null
+}
+
+update_owner_runs_venv() {
+    local tree="$1" name py
+    py="${tree%/}/.venv/bin/python3"
+    [[ -e "$py" ]] || return 0
+    name=$(update_path_owner_name "$tree")
+    if [[ "$name" == "unknown" || "$name" == "UNKNOWN" ]]; then
+        echo "[update] warning: $tree has no named owner; skipping the venv check as the owner" >&2
+        return 0
+    fi
+    if ! command -v runuser >/dev/null 2>&1; then
+        echo "[update] warning: runuser is not installed; skipping the venv check as $name" >&2
+        return 0
+    fi
+    runuser -u "$name" -- "$py" -c 'import encodings, sqlite3' >/dev/null 2>&1
+}
