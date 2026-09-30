@@ -830,6 +830,7 @@ func main() {
 		dueStrategies, evaluationMarks, zeroCapitalSkipped := computeDueSet(dueAt, cfg, intervals, lastRun, lastEvaluated, deadlineFeed, sharedSched)
 		for _, id := range zeroCapitalSkipped {
 			fmt.Printf("[ERROR] %s: capital_pct set but capital resolved to $0 — skipping\n", id)
+			globalRunEvidence.markZeroCapitalSkipped(id, time.Now())
 		}
 		var sharedDeadline time.Time
 		if sharedFeed {
@@ -1037,6 +1038,7 @@ func main() {
 
 		if allPartitionsSaveBlocked(store, cfg) {
 			fmt.Println("[CRITICAL] State save failed 3x, skipping trades this cycle")
+			recordHeldStrategies(dueStrategies, nil, store, time.Now())
 			globalRegimeStore.resetForCycle(time.Now().UTC())
 			mu.Lock()
 			for _, ss := range state.Strategies {
@@ -1789,6 +1791,7 @@ func main() {
 				}
 				return lg
 			})
+			recordHeldStrategies(dueStrategies, scopeRisk, store, time.Now())
 			dueUnlatched := dueStrategiesPersistable(store, dueStrategiesNotLatched(dueStrategies, scopeRisk))
 			hlBatchResults := runHyperliquidBatchPrePass(dueUnlatched, state, &mu, cfg, prices, notifier, func(format string, a ...any) {
 				fmt.Printf(format+"\n", a...)
@@ -3172,6 +3175,7 @@ func main() {
 		}
 		if savedAll {
 			offCycleAuditSaveDirty = false
+			globalRunEvidence.markStateSaved(time.Now())
 		}
 
 		var postLeaderboard bool
