@@ -287,6 +287,67 @@ def fee_pct_for_platform(platform: str) -> float:
     return PLATFORM_FEE_PCT.get(platform, PLATFORM_FEE_PCT["binanceus"])
 
 
+DEFAULT_SLIPPAGE_PCT = 0.0005
+
+EXECUTION_SPEC_KEYS = (
+    "taker_fee_pct",
+    "maker_fee_pct",
+    "half_spread_pct",
+    "slippage_pct",
+    "size_decimals",
+    "min_notional_usd",
+    "min_notional_margin",
+)
+
+_hl_lot_floor_fn = None
+
+
+def _hl_floor_lot_size(qty: float, decimals: int) -> float:
+    global _hl_lot_floor_fn
+    if _hl_lot_floor_fn is None:
+        import importlib.util
+        path = os.path.join(_REPO_ROOT, "platforms", "hyperliquid", "adapter.py")
+        spec = importlib.util.spec_from_file_location("_backtest_hl_adapter_lot", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _hl_lot_floor_fn = mod.floor_lot_size
+    return float(_hl_lot_floor_fn(qty, decimals))
+
+
+def normalize_execution_spec(spec: Optional[dict]) -> Optional[dict]:
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError(f"execution_spec must be a dict, got {type(spec).__name__}")
+    unknown = sorted(set(spec) - set(EXECUTION_SPEC_KEYS))
+    missing = sorted(set(EXECUTION_SPEC_KEYS) - set(spec))
+    if unknown or missing:
+        raise ValueError(
+            f"execution_spec keys must be exactly {list(EXECUTION_SPEC_KEYS)}; "
+            f"unknown={unknown} missing={missing}"
+        )
+    out: dict = {}
+    for key in EXECUTION_SPEC_KEYS:
+        value = spec[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"execution_spec.{key} must be a number, got {value!r}")
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"execution_spec.{key} must be finite and >= 0, got {value!r}")
+        out[key] = value
+    for key in ("taker_fee_pct", "maker_fee_pct", "half_spread_pct", "slippage_pct"):
+        if out[key] >= 0.1:
+            raise ValueError(
+                f"execution_spec.{key} is a fraction (0.00045 = 0.045%); {out[key]!r} is not plausible"
+            )
+    if not out["size_decimals"].is_integer():
+        raise ValueError(
+            f"execution_spec.size_decimals must be an integer, got {spec['size_decimals']!r}"
+        )
+    out["size_decimals"] = int(out["size_decimals"])
+    return out
+
+
 def _open_action_from_signal(signal: int) -> str:
     if signal > 0:
         return "long"
@@ -655,8 +716,18 @@ class Backtester:
                  risk_per_trade_pct: Optional[float] = None,
                  allow_scale_in: bool = False,
                  scale_in: Optional[dict] = None,
-                 atr_method: str = "simple"):
+                 atr_method: str = "simple",
+                 execution_spec: Optional[dict] = None):
         self.initial_capital = initial_capital
+        self._execution = normalize_execution_spec(execution_spec)
+        if self._execution is not None and (
+            commission_pct is not None or slippage_pct != DEFAULT_SLIPPAGE_PCT
+        ):
+            raise ValueError(
+                "execution_spec owns fees, spread and slippage; do not also pass "
+                "commission_pct or a non-default slippage_pct (each cost would be "
+                "charged twice)"
+            )
         self.platform = platform
         self.intrabar_resolution = str(intrabar_resolution or "").strip().lower()
         if self.intrabar_resolution not in ("ohlc_walk", "bar_close"):
@@ -669,6 +740,13 @@ class Backtester:
             else fee_pct_for_platform(platform)
         )
         self.slippage_pct = slippage_pct
+        self._maker_fee_pct: Optional[float] = None
+        if self._execution is not None:
+            self.commission_pct = self._execution["taker_fee_pct"]
+            self.slippage_pct = (
+                self._execution["half_spread_pct"] + self._execution["slippage_pct"]
+            )
+            self._maker_fee_pct = self._execution["maker_fee_pct"]
         self.open_strategy = dict(open_strategy or {})
         self._close_refs: list[dict] = []
         for ref in close_strategies or []:
@@ -1229,7 +1307,8 @@ class Backtester:
     def run(self, df: pd.DataFrame, strategy_name: str = "Unknown",
             symbol: str = "BTC/USDT", timeframe: str = "1d",
             params: Optional[dict] = None, save: bool = True,
-            starting_long: Optional[dict] = None) -> dict:
+            starting_long: Optional[dict] = None,
+            indicator_frame: Optional[pd.DataFrame] = None) -> dict:
         uses_open_close = (
             "open_action" in df.columns
             or bool(_close_fraction_columns(df))
@@ -1253,6 +1332,23 @@ class Backtester:
                     "regime_directional_policy direction='both' requires a "
                     "close evaluator on the plain signal path; labels with "
                     f"both: {both_labels}"
+                )
+        if self._execution is not None:
+            if not uses_open_close:
+                raise ValueError(
+                    "execution_spec requires the open/close engine path (a close "
+                    "strategy or open_action/close_fraction columns); the plain "
+                    "signal path has no lot- or minimum-aware fill sites"
+                )
+            if self.allow_scale_in:
+                raise ValueError(
+                    "execution_spec does not model scale-in adds; run without "
+                    "allow_scale_in"
+                )
+            if starting_long:
+                raise ValueError(
+                    "execution_spec cannot seed starting_long: the seeded "
+                    "quantity was never lot-floored or minimum-checked"
                 )
         plain_short = (not uses_open_close) and self.direction == "short"
         if plain_short and starting_long:
@@ -1278,6 +1374,26 @@ class Backtester:
                 )
         if "signal" not in df.columns and not uses_open_close and not has_profile_alloc:
             raise ValueError("DataFrame must have a 'signal' column or open_action/close_fraction columns")
+        if indicator_frame is not None:
+            if not indicator_frame.index.is_unique or not df.index.isin(indicator_frame.index).all():
+                raise ValueError(
+                    "indicator_frame must have a unique index that contains every "
+                    "bar of the scored frame"
+                )
+            shared = [c for c in ("open", "high", "low", "close")
+                      if c in df.columns and c in indicator_frame.columns]
+            if not np.array_equal(
+                indicator_frame.loc[df.index, shared].to_numpy(dtype=float),
+                df[shared].to_numpy(dtype=float),
+                equal_nan=True,
+            ):
+                raise ValueError(
+                    "indicator_frame bars must match the scored frame's open, high, "
+                    "low and close values"
+                )
+            history = indicator_frame
+        else:
+            history = df
 
         df = df.copy()
         if has_profile_alloc:
@@ -1331,7 +1447,8 @@ class Backtester:
             df["_regime_bar_close"] = df["regime"].copy()
 
         if self.regime_enabled and "regime" in df.columns:
-            df["regime"] = df["regime"].shift(1).fillna("")
+            regime_source = history["regime"] if "regime" in history.columns else df["regime"]
+            df["regime"] = regime_source.shift(1).reindex(df.index).fillna("")
 
         hurst_runner = None
         if self.hurst_gate and self.hurst_gate.get("enabled"):
@@ -1341,7 +1458,7 @@ class Backtester:
             frame_bars = hurst_live_frame_bars(
                 self.regime_windows_spec, self.regime_period
             )
-            df["_hurst"] = rolling_hurst(df["close"], frame_bars).shift(1)
+            df["_hurst"] = rolling_hurst(history["close"], frame_bars).shift(1).reindex(df.index)
 
         has_open = "open" in df.columns
 
@@ -1386,12 +1503,14 @@ class Backtester:
         trailing_ratchet_active = self._uses_trailing_ratchet_close
 
         zscore_series = None
-        if self._zscore_lookback > 0 and "close" in df.columns:
+        if self._zscore_lookback > 0 and "close" in history.columns:
             lb = self._zscore_lookback
-            closes = df["close"].astype(float)
+            closes = history["close"].astype(float)
             roll = closes.rolling(lb)
             std = roll.std(ddof=0)
-            zscore_series = (closes - roll.mean()) / std.replace(0.0, float("nan"))
+            zscore_series = (
+                (closes - roll.mean()) / std.replace(0.0, float("nan"))
+            ).reindex(df.index)
 
         avwap_series = df["avwap"] if "avwap" in df.columns else None
         if self._close_names_include_avwap_stop():
@@ -1402,12 +1521,12 @@ class Backtester:
                 from strategy_composition import warn_avwap_stop_missing_context
                 warn_avwap_stop_missing_context()
 
-        atr_series = df["atr"] if "atr" in df.columns else None
+        atr_series = history["atr"] if "atr" in history.columns else None
         if atr_series is None and (
             (self.stop_loss_atr_mult is not None and self.stop_loss_atr_mult > 0)
             or (self.trailing_stop_atr_mult is not None and self.trailing_stop_atr_mult > 0)
         ):
-            atr_series = standard_atr(df, method=self.atr_method)
+            atr_series = standard_atr(history, method=self.atr_method)
 
         def _initial_trail_trigger(side: str, mark: float, entry_atr: float,
                                     trail_mult: float) -> float:
@@ -1559,6 +1678,12 @@ class Backtester:
 
         book_funding = "funding_accrual" in df.columns
         total_funding_pnl = 0.0
+        execution_log: dict = {
+            "rejected_entries": [],
+            "skipped_partial_closes": [],
+            "close_residuals": [],
+            "entry_lot_residual_qty": 0.0,
+        }
 
         has_entry_fraction = "_entry_fraction" in df.columns
 
@@ -1634,23 +1759,76 @@ class Backtester:
             hold.entry_fee += commission
             return True
 
+        def _spec_entry_fill(side: str, raw_fill: float, budget: float, idx):
+            spec = self._execution
+            if side == "long":
+                effective_price = raw_fill * (1 + self.slippage_pct)
+            else:
+                effective_price = raw_fill * (1 - self.slippage_pct)
+            if not (effective_price > 0) or not (budget > 0):
+                execution_log["rejected_entries"].append({
+                    "date": str(idx), "side": side, "reason": "no_budget_or_price",
+                    "requested_qty": 0.0, "floored_qty": 0.0, "notional_usd": 0.0,
+                })
+                return None
+            requested_qty = budget / (1.0 + spec["taker_fee_pct"]) / effective_price
+            qty = _hl_floor_lot_size(requested_qty, spec["size_decimals"])
+            notional = qty * effective_price
+            threshold = spec["min_notional_usd"] * (1.0 + spec["min_notional_margin"])
+            reason = ""
+            if qty <= 0:
+                reason = "below_lot"
+            elif notional < threshold:
+                reason = "below_min_notional"
+            if reason:
+                execution_log["rejected_entries"].append({
+                    "date": str(idx), "side": side, "reason": reason,
+                    "requested_qty": requested_qty, "floored_qty": qty,
+                    "notional_usd": notional, "threshold_usd": threshold,
+                })
+                return None
+            execution_log["entry_lot_residual_qty"] += requested_qty - qty
+            return effective_price, qty, notional * spec["taker_fee_pct"]
+
         def _book_close(idx, close_fraction: float, raw_fill: float, slippage: float,
-                        reason: str, bar_mark: float, seed_price: float) -> bool:
+                        reason: str, bar_mark: float, seed_price: float,
+                        fee_pct: Optional[float] = None) -> bool:
             nonlocal position, cash, avg_cost, initial_quantity, entry_atr_value
             nonlocal current_trade, sl_trigger_px, sl_tiers_processed
             nonlocal post_tp_trail_mult, sl_high_water_px
             sl_after_moved = False
+            fee_rate = self.commission_pct if fee_pct is None else fee_pct
             qty_to_close = abs(position) * min(close_fraction, 1.0)
+            if self._execution is not None and close_fraction < 1.0:
+                spec = self._execution
+                floored = _hl_floor_lot_size(qty_to_close, spec["size_decimals"])
+                notional = floored * raw_fill
+                threshold = spec["min_notional_usd"] * (1.0 + spec["min_notional_margin"])
+                if floored <= 0 or notional < threshold:
+                    execution_log["skipped_partial_closes"].append({
+                        "date": str(idx), "reason": reason or "close_strategy",
+                        "gate": "below_lot" if floored <= 0 else "below_min_notional",
+                        "requested_qty": qty_to_close, "floored_qty": floored,
+                        "notional_usd": notional, "threshold_usd": threshold,
+                    })
+                    return False
+                if floored < qty_to_close:
+                    execution_log["close_residuals"].append({
+                        "date": str(idx), "requested_qty": qty_to_close,
+                        "floored_qty": floored,
+                        "residual_qty": qty_to_close - floored,
+                    })
+                qty_to_close = floored
             if position > 0:
                 effective_price = raw_fill * (1 - slippage)
                 proceeds = qty_to_close * effective_price
-                commission = proceeds * self.commission_pct
+                commission = proceeds * fee_rate
                 cash += proceeds - commission
                 position -= qty_to_close
             else:
                 effective_price = raw_fill * (1 + slippage)
                 cost = qty_to_close * effective_price
-                commission = cost * self.commission_pct
+                commission = cost * fee_rate
                 cash -= cost + commission
                 position += qty_to_close
 
@@ -1846,14 +2024,36 @@ class Backtester:
                         )
                     )
 
-                if open_action == "long" and position == 0 and cash > 0 and not regime_blocked and not risk_entry_blocked:
-                    effective_price = fill_price * (1 + self.slippage_pct)
-                    invest = cash * entry_fraction
-                    commission = invest * self.commission_pct
-                    available = invest - commission
-                    shares = available / effective_price
-                    position = shares
-                    cash -= invest
+                long_entry_ok = (
+                    open_action == "long" and position == 0 and cash > 0
+                    and not regime_blocked and not risk_entry_blocked
+                )
+                short_entry_ok = (
+                    open_action == "short" and position == 0 and cash > 0
+                    and not regime_blocked and not risk_entry_blocked
+                )
+                spec_fill = None
+                if self._execution is not None and (long_entry_ok or short_entry_ok):
+                    spec_fill = _spec_entry_fill(
+                        "long" if long_entry_ok else "short",
+                        fill_price, cash * entry_fraction, idx,
+                    )
+                    if spec_fill is None:
+                        long_entry_ok = False
+                        short_entry_ok = False
+                if long_entry_ok:
+                    if spec_fill is not None:
+                        effective_price, shares, commission = spec_fill
+                        position = shares
+                        cash -= shares * effective_price + commission
+                    else:
+                        effective_price = fill_price * (1 + self.slippage_pct)
+                        invest = cash * entry_fraction
+                        commission = invest * self.commission_pct
+                        available = invest - commission
+                        shares = available / effective_price
+                        position = shares
+                        cash -= invest
 
                     current_trade = Trade(idx, effective_price, "long")
                     current_trade.shares = shares
@@ -1897,14 +2097,19 @@ class Backtester:
                         sl_tiers_processed = 0
                         post_tp_trail_mult = None
                         sl_high_water_px = mark_price
-                elif open_action == "short" and position == 0 and cash > 0 and not regime_blocked and not risk_entry_blocked:
-                    effective_price = fill_price * (1 - self.slippage_pct)
-                    margin = cash * entry_fraction
-                    commission = margin * self.commission_pct
-                    notional = margin - commission
-                    shares = notional / effective_price
-                    cash += 2 * notional - margin
-                    position = -shares
+                elif short_entry_ok:
+                    if spec_fill is not None:
+                        effective_price, shares, commission = spec_fill
+                        cash += shares * effective_price - commission
+                        position = -shares
+                    else:
+                        effective_price = fill_price * (1 - self.slippage_pct)
+                        margin = cash * entry_fraction
+                        commission = margin * self.commission_pct
+                        notional = margin - commission
+                        shares = notional / effective_price
+                        cash += 2 * notional - margin
+                        position = -shares
 
                     current_trade = Trade(idx, effective_price, "short")
                     current_trade.shares = shares
@@ -2052,7 +2257,8 @@ class Backtester:
                         and tier_fill_price > 0
                     ):
                         if _book_close(idx, pending_close_fraction, tier_fill_price, 0.0,
-                                       pending_close_reason, mark_price, mark_price):
+                                       pending_close_reason, mark_price, mark_price,
+                                       fee_pct=self._maker_fee_pct):
                             sl_after_just_applied = True
                         pending_close_fraction = 0.0
                         pending_close_reason = ""
@@ -2424,6 +2630,20 @@ class Backtester:
             "close_strategies": [dict(r) for r in self._close_refs],
             "trades": [t.to_dict() for t in trades],
         })
+        if self._execution is not None:
+            metrics["execution"] = {
+                "spec": dict(self._execution),
+                "combined_adverse_price_pct": self.slippage_pct,
+                "rejected_entry_count": len(execution_log["rejected_entries"]),
+                "skipped_partial_close_count": len(execution_log["skipped_partial_closes"]),
+                "close_residual_qty": sum(
+                    r["residual_qty"] for r in execution_log["close_residuals"]
+                ),
+                "entry_lot_residual_qty": execution_log["entry_lot_residual_qty"],
+                "rejected_entries": execution_log["rejected_entries"],
+                "skipped_partial_closes": execution_log["skipped_partial_closes"],
+                "close_residuals": execution_log["close_residuals"],
+            }
         if risk_mode:
             metrics["risk_per_trade_pct"] = self.risk_per_trade_pct
             metrics["risk_sizing_skipped_entries"] = risk_skipped_entries
