@@ -84,6 +84,7 @@ func validateStrategyJSONKeys(rawData []byte) []string {
 		}
 		errs = append(errs, nestedObjectUnknownKeyErrors(s, "hedge", knownHedgeConfigKeys(), prefix)...)
 		errs = append(errs, nestedObjectUnknownKeyErrors(s, "hurst_gate", knownHurstGateKeys(), prefix)...)
+		errs = append(errs, nestedObjectUnknownKeyErrors(s, "event_risk_gate", knownEventRiskGateKeys(), prefix)...)
 	}
 	return errs
 }
@@ -96,6 +97,14 @@ func validateAltDataJSONKeys(rawData []byte) []string {
 	return nestedObjectUnknownKeyErrors(envelope, "alt_data_recorder", knownAltDataRecorderKeys(), "alt_data_recorder")
 }
 
+func validateEventRiskJSONKeys(rawData []byte) []string {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(rawData, &envelope); err != nil {
+		return nil
+	}
+	return nestedObjectUnknownKeyErrors(envelope, "event_risk", knownEventRiskKeys(), "event_risk")
+}
+
 func knownHedgeConfigKeys() map[string]bool {
 	return knownJSONKeys(reflect.TypeOf(HedgeConfig{}))
 }
@@ -106,6 +115,14 @@ func knownHurstGateKeys() map[string]bool {
 
 func knownAltDataRecorderKeys() map[string]bool {
 	return knownJSONKeys(reflect.TypeOf(AltDataRecorderConfig{}))
+}
+
+func knownEventRiskKeys() map[string]bool {
+	return knownJSONKeys(reflect.TypeOf(EventRiskConfig{}))
+}
+
+func knownEventRiskGateKeys() map[string]bool {
+	return knownJSONKeys(reflect.TypeOf(EventRiskGateConfig{}))
 }
 
 func nestedObjectUnknownKeyErrors(entry map[string]json.RawMessage, field string, known map[string]bool, prefix string) []string {

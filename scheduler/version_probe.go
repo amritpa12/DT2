@@ -225,6 +225,9 @@ func probeCheckScripts(cfg *Config) error {
 		if err := probeOneCheckScriptFn(altDataRecorderScript, altDataRecorderProbeArgv); err != nil {
 			return err
 		}
+		if err := probeOneCheckScriptFn(eventRiskFeedScript, eventRiskFeedProbeArgv); err != nil {
+			return err
+		}
 	}
 	return nil
 }
