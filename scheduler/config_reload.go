@@ -69,6 +69,11 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 			server.tuning.setMaxRetainedRuns(cfg.tuningMaxRetainedRuns())
 		}
 	}
+	if !reflect.DeepEqual(cfg.AltDataRecorder, next.AltDataRecorder) {
+		addChange("alt_data_recorder: %s -> %s", formatAltDataRecorderForLog(cfg.AltDataRecorder), formatAltDataRecorderForLog(next.AltDataRecorder))
+		cfg.AltDataRecorder = cloneAltDataRecorderConfig(next.AltDataRecorder)
+		applyAltDataRecorderHotReload(cfg.AltDataRecorder)
+	}
 	if !reflect.DeepEqual(cfg.UserDefaults, next.UserDefaults) {
 		addChange("user_defaults: %s -> %s", formatUserDefaults(cfg.UserDefaults), formatUserDefaults(next.UserDefaults))
 		cfg.UserDefaults = cloneUserDefaults(next.UserDefaults)

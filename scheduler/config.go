@@ -327,6 +327,7 @@ type Config struct {
 	SharedMarketFeed         *SharedMarketFeedConfig    `json:"shared_market_feed,omitempty"`
 	Role                     string                     `json:"role,omitempty"`
 	Feed                     *FeedRoleConfig            `json:"feed,omitempty"`
+	AltDataRecorder          *AltDataRecorderConfig     `json:"alt_data_recorder,omitempty"`
 
 	migrationBaseVersion    int
 	migrationBaseVersionSet bool
@@ -1029,6 +1030,7 @@ func loadConfig(path string, skipLiveCredentialChecks bool, readOnly bool) (*Con
 	}
 	unknownErrs := validateStrategyJSONKeys(data)
 	unknownErrs = append(unknownErrs, validateUserDefaultsJSONKeys(data)...)
+	unknownErrs = append(unknownErrs, validateAltDataJSONKeys(data)...)
 	if len(unknownErrs) > 0 {
 		return nil, fmt.Errorf("config validation errors:\n  %s", strings.Join(unknownErrs, "\n  "))
 	}
@@ -2166,6 +2168,7 @@ func validateConfig(cfg *Config, skipLiveCredentialChecks bool) error {
 	errs = append(errs, validateStrategyRegimeVocabulary(cfg)...)
 	errs = append(errs, validateRegimeTransitionsConfig(cfg)...)
 	errs = append(errs, validateHurstGateConfigs(cfg)...)
+	errs = append(errs, validateAltDataRecorderConfig(cfg)...)
 
 	if cfg.Regime == nil || !cfg.Regime.Enabled {
 		for _, sc := range cfg.Strategies {

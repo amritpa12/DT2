@@ -489,6 +489,10 @@ func main() {
 	)
 	llmEntryAnalysisEnqueue = llmWorker.Enqueue
 	go llmWorker.run(shutdownReadOnlyCtx)
+	altDataWorker := newAltDataRecorderWorker(store, notifier, runAltDataRecorderFetch)
+	altDataWorker.setConfig(cfg.AltDataRecorder)
+	altDataRecorderApplyConfig = altDataWorker.setConfig
+	go altDataWorker.run(shutdownReadOnlyCtx)
 	if anyStrategyUsesLLMEntryAnalysis(cfg) && os.Getenv(llmEntryAnalysisAPIKeyEnv) == "" {
 		fmt.Printf("[WARN] llm_entry_analysis enabled but %s is not set — analyses will fail (advisory only, trading unaffected)\n", llmEntryAnalysisAPIKeyEnv)
 	}

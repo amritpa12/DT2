@@ -478,6 +478,23 @@ CREATE TABLE IF NOT EXISTS regime_reversal_alerts (
     alerted_at TEXT NOT NULL,
     PRIMARY KEY (platform, symbol, timeframe, spec_json)
 );
+
+-- Point-in-time alt-data archive. observed_at is this process's receipt
+-- clock, never the vendor published_at. Primary / live-owned; paper
+-- partitions read the same rows through StateStore.liveFile.
+CREATE TABLE IF NOT EXISTS alt_data_readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    asset TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL,
+    url_hash TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL,
+    raw_json TEXT NOT NULL DEFAULT '',
+    UNIQUE(source_id, asset, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_alt_data_readings_observed ON alt_data_readings(observed_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_alt_data_readings_source ON alt_data_readings(source_id, asset, observed_at DESC);
 `
 
 type StateDB struct {

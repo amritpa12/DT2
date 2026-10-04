@@ -88,12 +88,24 @@ func validateStrategyJSONKeys(rawData []byte) []string {
 	return errs
 }
 
+func validateAltDataJSONKeys(rawData []byte) []string {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(rawData, &envelope); err != nil {
+		return nil
+	}
+	return nestedObjectUnknownKeyErrors(envelope, "alt_data_recorder", knownAltDataRecorderKeys(), "alt_data_recorder")
+}
+
 func knownHedgeConfigKeys() map[string]bool {
 	return knownJSONKeys(reflect.TypeOf(HedgeConfig{}))
 }
 
 func knownHurstGateKeys() map[string]bool {
 	return knownJSONKeys(reflect.TypeOf(HurstGateConfig{}))
+}
+
+func knownAltDataRecorderKeys() map[string]bool {
+	return knownJSONKeys(reflect.TypeOf(AltDataRecorderConfig{}))
 }
 
 func nestedObjectUnknownKeyErrors(entry map[string]json.RawMessage, field string, known map[string]bool, prefix string) []string {

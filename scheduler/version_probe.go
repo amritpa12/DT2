@@ -222,6 +222,9 @@ func probeCheckScripts(cfg *Config) error {
 		if err := probeOneCheckScriptFn("shared_scripts/simulate_strategy.py", simulateStrategyProbeArgv); err != nil {
 			return err
 		}
+		if err := probeOneCheckScriptFn(altDataRecorderScript, altDataRecorderProbeArgv); err != nil {
+			return err
+		}
 	}
 	return nil
 }
