@@ -84,6 +84,7 @@ type StrategyState struct {
 	RegimeDivergence        *RegimeDivergenceState     `json:"-"`
 	RegimeProfile           *RegimeProfileState        `json:"regime_profile,omitempty"`
 	HurstGate               HurstGateState             `json:"hurst_gate_state,omitempty"`
+	EventRiskGate           EventRiskGateState         `json:"event_risk_gate_state,omitempty"`
 	ClosedPositions         []ClosedPosition           `json:"-"`
 	ClosedOptionPositions   []ClosedOptionPosition     `json:"-"`
 	pendingTradeDiagnostics []TradeDiagnosticsRow      `json:"-"`

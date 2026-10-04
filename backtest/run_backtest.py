@@ -725,6 +725,14 @@ def load_strategy_config(config_path: str, strategy_id: str,
                 f"release (backtester parity deferred — see #907). Use the "
                 f"static `direction` / `invert_signal` fields for backtesting."
             )
+        event_risk_gate = sc.get("event_risk_gate")
+        if isinstance(event_risk_gate, dict) and event_risk_gate.get("enabled"):
+            raise ValueError(
+                f"{config_path}: strategy {strategy_id!r} uses "
+                f"event_risk_gate, which is live-only until an archive-backed "
+                f"replay exists. Set event_risk_gate.enabled=false (or remove "
+                f"the block) to backtest without the gate."
+            )
         hedge_cfg = sc.get("hedge")
         if isinstance(hedge_cfg, dict) and hedge_cfg.get("enabled"):
             raise ValueError(

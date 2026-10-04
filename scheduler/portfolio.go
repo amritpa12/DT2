@@ -53,6 +53,7 @@ type Position struct {
 	ATRMethodAtOpen                 string            `json:"atr_method_at_open,omitempty"`
 	HurstAtOpen                     float64           `json:"hurst_at_open,omitempty"`
 	HurstSizeMult                   float64           `json:"hurst_size_mult,omitempty"`
+	EventRiskAtOpen                 string            `json:"event_risk_at_open,omitempty"`
 	HedgeFor                        string            `json:"hedge_for,omitempty"`
 	HedgePrimaryQtyBasis            float64           `json:"hedge_primary_qty_basis,omitempty"`
 	SharedCloseHoldUSD              float64           `json:"shared_close_hold_usd,omitempty"`
