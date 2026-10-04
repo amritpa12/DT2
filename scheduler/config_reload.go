@@ -69,6 +69,16 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 			server.tuning.setMaxRetainedRuns(cfg.tuningMaxRetainedRuns())
 		}
 	}
+	if !reflect.DeepEqual(cfg.AltDataRecorder, next.AltDataRecorder) {
+		addChange("alt_data_recorder: %s -> %s", formatAltDataRecorderForLog(cfg.AltDataRecorder), formatAltDataRecorderForLog(next.AltDataRecorder))
+		cfg.AltDataRecorder = cloneAltDataRecorderConfig(next.AltDataRecorder)
+		applyAltDataRecorderHotReload(cfg.AltDataRecorder)
+	}
+	if !reflect.DeepEqual(cfg.EventRisk, next.EventRisk) {
+		addChange("event_risk: %s -> %s", formatEventRiskForLog(cfg.EventRisk), formatEventRiskForLog(next.EventRisk))
+		cfg.EventRisk = cloneEventRiskConfig(next.EventRisk)
+		applyEventRiskHotReload(next)
+	}
 	if !reflect.DeepEqual(cfg.UserDefaults, next.UserDefaults) {
 		addChange("user_defaults: %s -> %s", formatUserDefaults(cfg.UserDefaults), formatUserDefaults(next.UserDefaults))
 		cfg.UserDefaults = cloneUserDefaults(next.UserDefaults)
@@ -204,6 +214,10 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 		if !reflect.DeepEqual(sc.HurstGate, ns.HurstGate) {
 			addChange("strategy[%s].hurst_gate: %s -> %s", sc.ID, formatHurstGateForLog(sc.HurstGate), formatHurstGateForLog(ns.HurstGate))
 			sc.HurstGate = cloneHurstGateConfig(ns.HurstGate)
+		}
+		if !eventRiskGateConfigsEqual(sc.EventRiskGate, ns.EventRiskGate) {
+			addChange("strategy[%s].event_risk_gate: %s -> %s", sc.ID, formatEventRiskGateForLog(sc.EventRiskGate), formatEventRiskGateForLog(ns.EventRiskGate))
+			sc.EventRiskGate = cloneEventRiskGateConfig(ns.EventRiskGate)
 		}
 		if sc.MarginMode != ns.MarginMode {
 			addChange("strategy[%s].margin_mode: %q -> %q", sc.ID, sc.MarginMode, ns.MarginMode)
@@ -399,6 +413,8 @@ func applyHotReloadConfig(cfg, next *Config, state *AppState, notifier *MultiNot
 
 	cfg.ConfigVersion = next.ConfigVersion
 	cfg.Platforms = next.Platforms
+
+	applyEventRiskHotReload(cfg)
 
 	rebuildReplayLiveSources(cfg)
 
@@ -715,6 +731,10 @@ func validateHotReloadStateCompatible(cfg, next *Config, state *AppState) error 
 				}
 			}
 		}
+		if !eventRiskGateConfigsEqual(sc.EventRiskGate, ns.EventRiskGate) && strategyHasOpenPositions(stateStrategy(state, sc.ID)) {
+			errs = append(errs, fmt.Sprintf("strategy[%s] event_risk_gate changed with open positions (flatten first or restart after close)",
+				sc.ID))
+		}
 		if (sc.Type == "perps" || sc.Type == "manual") && sc.Platform == "hyperliquid" && strategyHasOpenPositions(stateStrategy(state, sc.ID)) {
 			oldRules, _ := parseStrategyTPSLAfterRules(sc)
 			newRules, _ := parseStrategyTPSLAfterRules(ns)
@@ -762,6 +782,7 @@ func strategyRestartShape(sc StrategyConfig) StrategyConfig {
 	sc.AllowedRegimes = nil
 	sc.RegimeGateOnFailure = ""
 	sc.HurstGate = nil
+	sc.EventRiskGate = nil
 	sc.MarginMode = ""
 	sc.TrailingStopPct = nil
 	sc.TrailingStopATRMult = nil

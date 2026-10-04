@@ -692,18 +692,19 @@ func strategyScopeInspectJSON(sc StrategyConfig, cfg *Config) map[string]interfa
 	scope := portfolioScopeFor(sc)
 	part := partitionFor(sc)
 	out := map[string]interface{}{
-		"scope":                  scope,
-		"partition":              part.String(),
-		"paper_source":           sc.PaperSource,
-		"storage_strategy_id":    effectiveStorageStrategyID(sc),
-		"capital":                sc.Capital,
-		"capital_pct":            sc.CapitalPct,
-		"initial_capital":        sc.InitialCapital,
-		"margin_per_trade_usd":   EffectiveMarginPerTradeUSD(sc),
-		"htf_filter":             sc.HTFFilter,
-		"allowed_regimes":        append([]string{}, sc.AllowedRegimes...),
-		"hurst_gate_enabled":     hurstGateConfigured(sc),
-		"regime_gate_on_failure": resolveRegimeGateOnFailure(sc, regimeConfigOf(cfg)),
+		"scope":                   scope,
+		"partition":               part.String(),
+		"paper_source":            sc.PaperSource,
+		"storage_strategy_id":     effectiveStorageStrategyID(sc),
+		"capital":                 sc.Capital,
+		"capital_pct":             sc.CapitalPct,
+		"initial_capital":         sc.InitialCapital,
+		"margin_per_trade_usd":    EffectiveMarginPerTradeUSD(sc),
+		"htf_filter":              sc.HTFFilter,
+		"allowed_regimes":         append([]string{}, sc.AllowedRegimes...),
+		"hurst_gate_enabled":      hurstGateConfigured(sc),
+		"event_risk_gate_enabled": eventRiskGateConfigured(sc),
+		"regime_gate_on_failure":  resolveRegimeGateOnFailure(sc, regimeConfigOf(cfg)),
 	}
 	if sc.RiskPerTradePct != nil {
 		out["risk_per_trade_pct"] = *sc.RiskPerTradePct

@@ -489,6 +489,15 @@ func main() {
 	)
 	llmEntryAnalysisEnqueue = llmWorker.Enqueue
 	go llmWorker.run(shutdownReadOnlyCtx)
+	altDataWorker := newAltDataRecorderWorker(store, notifier, runAltDataRecorderFetch)
+	altDataWorker.setConfig(cfg.AltDataRecorder)
+	altDataRecorderApplyConfig = altDataWorker.setConfig
+	go altDataWorker.run(shutdownReadOnlyCtx)
+	eventRiskWorker := newEventRiskFeedWorker(store, notifier, runEventRiskFeedFetch)
+	eventRiskWorker.setConfig(cfg)
+	eventRiskFeedApplyConfig = eventRiskWorker.setConfig
+	eventRiskFeedLastSuccess = eventRiskWorker.lastSuccessAt
+	go eventRiskWorker.run(shutdownReadOnlyCtx)
 	if anyStrategyUsesLLMEntryAnalysis(cfg) && os.Getenv(llmEntryAnalysisAPIKeyEnv) == "" {
 		fmt.Printf("[WARN] llm_entry_analysis enabled but %s is not set — analyses will fail (advisory only, trading unaffected)\n", llmEntryAnalysisAPIKeyEnv)
 	}
@@ -2058,6 +2067,11 @@ func main() {
 								logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 								result.Signal = 0
 							}
+							prevEventSig := result.Signal
+							eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, okxPosQty, &result.Signal, result.CloseFraction, okxPosSide, true, false)
+							if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+								logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
+							}
 							if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, okxPosQty, okxPosSide, true, false) {
 								logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
 								result.Signal = 0
@@ -2118,6 +2132,11 @@ func main() {
 								logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 								result.Signal = 0
 							}
+							prevEventSig := result.Signal
+							eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, rhPosQty, &result.Signal, result.CloseFraction, rhPosSide, true, false)
+							if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+								logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
+							}
 							if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, rhPosQty, rhPosSide, true, false) {
 								logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
 								result.Signal = 0
@@ -2175,6 +2194,11 @@ func main() {
 						if hurstDecision.Holds && pausedBlocksSignal(result.Signal, result.CloseFraction, spotPosCtx.Quantity, spotPosCtx.Side, true, false) {
 							logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 							result.Signal = 0
+						}
+						prevEventSig := result.Signal
+						eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, spotPosCtx.Quantity, &result.Signal, result.CloseFraction, spotPosCtx.Side, true, false)
+						if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+							logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
 						}
 						if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, spotPosCtx.Quantity, spotPosCtx.Side, true, false) {
 							logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
@@ -2275,6 +2299,11 @@ func main() {
 								logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 								result.Signal = 0
 							}
+							prevEventSig := result.Signal
+							eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, okxPosQty, &result.Signal, result.CloseFraction, okxPosSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc))
+							if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+								logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
+							}
 							if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, okxPosQty, okxPosSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc)) {
 								logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
 								result.Signal = 0
@@ -2347,6 +2376,11 @@ func main() {
 						if hurstDecision.Holds && pausedBlocksSignal(result.Signal, result.CloseFraction, hlPosQty, hlPosSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc)) {
 							logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 							result.Signal = 0
+						}
+						prevEventSig := result.Signal
+						eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, hlPosQty, &result.Signal, result.CloseFraction, hlPosSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc))
+						if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+							logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
 						}
 						if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, hlPosQty, hlPosSide, PerpsAllowsLong(sc), PerpsAllowsShort(sc)) {
 							logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
@@ -2793,6 +2827,11 @@ func main() {
 						if hurstDecision.Holds && pausedBlocksSignal(result.Signal, result.CloseFraction, tsContracts, tsPosSide, true, true) {
 							logger.Info("Hurst gate: %s signal suppressed — %s (#1411)", signalStr, hurstDecision.Detail)
 							result.Signal = 0
+						}
+						prevEventSig := result.Signal
+						eventRisk := applyEventRiskGateHold(sc, store, stratState, &mu, tsContracts, &result.Signal, result.CloseFraction, tsPosSide, true, true)
+						if eventRisk.Holds && prevEventSig != 0 && result.Signal == 0 {
+							logger.Info("Event-risk gate: %s signal suppressed — %s", signalStr, eventRisk.Detail)
 						}
 						if sc.Paused && pausedBlocksSignal(result.Signal, result.CloseFraction, tsContracts, tsPosSide, true, true) {
 							logger.Info("Paused: %s signal suppressed — position-increasing actions held while paused (#1150)", signalStr)
@@ -3419,6 +3458,7 @@ func executeSpotResult(sc StrategyConfig, s *StrategyState, db *StateDB, result 
 	stampDirectionCertifiedAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, regime)
 	stampATRMethodAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, cfg)
 	stampHurstGateAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, hurst)
+	stampEventRiskAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -4143,6 +4183,7 @@ func executeHyperliquidResultDeferredOpen(sc StrategyConfig, s *StrategyState, r
 	stampDirectionCertifiedAtOpenIfOpened(s, result.Symbol, openTrade != nil, sc, regime)
 	stampATRMethodAtOpenIfOpened(s, result.Symbol, openTrade != nil, sc, cfg)
 	stampHurstGateAtOpenIfOpened(s, result.Symbol, openTrade != nil, hurst)
+	stampEventRiskAtOpenIfOpened(s, result.Symbol, openTrade != nil)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		stampPositionProtectionSnapshot(pos, sc)
 	}
@@ -4399,6 +4440,7 @@ func executeTopStepResult(sc StrategyConfig, s *StrategyState, db *StateDB, resu
 	stampDirectionCertifiedAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, regime)
 	stampATRMethodAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, cfg)
 	stampHurstGateAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, hurst)
+	stampEventRiskAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -4566,6 +4608,7 @@ func executeRobinhoodResult(sc StrategyConfig, s *StrategyState, db *StateDB, re
 	stampDirectionCertifiedAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, regime)
 	stampATRMethodAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, cfg)
 	stampHurstGateAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, hurst)
+	stampEventRiskAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}
@@ -4776,6 +4819,7 @@ func executeOKXResult(sc StrategyConfig, s *StrategyState, db *StateDB, result *
 	stampDirectionCertifiedAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, regime)
 	stampATRMethodAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, sc, cfg)
 	stampHurstGateAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil, hurst)
+	stampEventRiskAtOpenIfOpened(s, result.Symbol, exec.OpenTrade != nil)
 	if pos, ok := s.Positions[result.Symbol]; ok {
 		recordPositionOpen(s, sc, exec.OpenTrade, pos)
 	}

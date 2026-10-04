@@ -327,6 +327,8 @@ type Config struct {
 	SharedMarketFeed         *SharedMarketFeedConfig    `json:"shared_market_feed,omitempty"`
 	Role                     string                     `json:"role,omitempty"`
 	Feed                     *FeedRoleConfig            `json:"feed,omitempty"`
+	AltDataRecorder          *AltDataRecorderConfig     `json:"alt_data_recorder,omitempty"`
+	EventRisk                *EventRiskConfig           `json:"event_risk,omitempty"`
 
 	migrationBaseVersion    int
 	migrationBaseVersionSet bool
@@ -646,6 +648,7 @@ type StrategyConfig struct {
 	RegimeATRWindow             string                   `json:"regime_atr_window,omitempty"`
 	RegimeDirectionalWindow     string                   `json:"regime_directional_window,omitempty"`
 	HurstGate                   *HurstGateConfig         `json:"hurst_gate,omitempty"`
+	EventRiskGate               *EventRiskGateConfig     `json:"event_risk_gate,omitempty"`
 	Capital                     float64                  `json:"capital"`
 	CapitalPct                  float64                  `json:"capital_pct,omitempty"`
 	InitialCapital              float64                  `json:"initial_capital,omitempty"`
@@ -1029,6 +1032,8 @@ func loadConfig(path string, skipLiveCredentialChecks bool, readOnly bool) (*Con
 	}
 	unknownErrs := validateStrategyJSONKeys(data)
 	unknownErrs = append(unknownErrs, validateUserDefaultsJSONKeys(data)...)
+	unknownErrs = append(unknownErrs, validateAltDataJSONKeys(data)...)
+	unknownErrs = append(unknownErrs, validateEventRiskJSONKeys(data)...)
 	if len(unknownErrs) > 0 {
 		return nil, fmt.Errorf("config validation errors:\n  %s", strings.Join(unknownErrs, "\n  "))
 	}
@@ -2166,6 +2171,9 @@ func validateConfig(cfg *Config, skipLiveCredentialChecks bool) error {
 	errs = append(errs, validateStrategyRegimeVocabulary(cfg)...)
 	errs = append(errs, validateRegimeTransitionsConfig(cfg)...)
 	errs = append(errs, validateHurstGateConfigs(cfg)...)
+	errs = append(errs, validateAltDataRecorderConfig(cfg)...)
+	errs = append(errs, validateEventRiskConfig(cfg)...)
+	errs = append(errs, validateEventRiskGateConfigs(cfg)...)
 
 	if cfg.Regime == nil || !cfg.Regime.Enabled {
 		for _, sc := range cfg.Strategies {

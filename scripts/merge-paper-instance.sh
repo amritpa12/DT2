@@ -385,6 +385,8 @@ REFUSE_ON_DIFFERENCE = [
     "alert_throttle_interval",
     "kill_switch_reset_dm_timeout",
     "telegram",
+    "alt_data_recorder",
+    "event_risk",
 ]
 DROPPED = [
     "status_port",
