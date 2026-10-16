@@ -8,7 +8,13 @@ Run this on the same computer as Roblox Studio. Studio has no supported MCP serv
 
 1. Open the place in Roblox Studio.
 2. Assistant, then Manage MCP Servers, then turn on **Enable Studio as MCP server**.
-3. From this directory, start the agent with `npx @cursor/bdk dev`.
+3. From this directory, install dependencies, sign in, and start the agent:
+
+```bash
+npm install
+npx @cursor/bdk login
+npx @cursor/bdk dev
+```
 
 The agent launches Studio's MCP server: `StudioMCP` on macOS, or `%LOCALAPPDATA%\Roblox\mcp.bat` on Windows. Set `ROBLOX_STUDIO_MCP_COMMAND` when that binary lives somewhere else.
 
